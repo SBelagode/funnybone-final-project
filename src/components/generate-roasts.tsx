@@ -19,6 +19,8 @@ import { ImageGridSkeleton } from '@/components/ui/image-grid-skeleton'
 import { useToast } from '@/hooks/use-toast'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -42,6 +44,7 @@ import { uploadImageViaSignedUrl } from '@/utils/upload-image-signed-url'
 import { toggleCaptionSave } from '@/utils/toggle-caption-save'
 import { roastAgain as roastAgainUtil } from '@/utils/roast-again'
 import { hasValidImageExtension, validExtensions } from '@/utils/valid-extension'
+import { MAX_NUDGE_LENGTH, validateNudge } from '@/utils/image-nudge'
 import { loadSavedCaptionIds } from '@/utils/saved-caption-ids'
 import { buildCaptionShareUrl } from '@/utils/site-url'
 import { useCaptionGeneration } from '@/hooks/useCaptionGeneration'
@@ -61,6 +64,7 @@ export function GenerateRoasts({
   redirectOnSelect = false,
 }: GenerateRoastsProps) {
   const [imageUrl, setImageUrl] = useState('')
+  const [nudge, setNudge] = useState('')
   const generation = useCaptionGeneration()
   const { isLoading } = generation
   const [imageId, setImageId] = useState<string | null>(null)
@@ -92,6 +96,8 @@ export function GenerateRoasts({
     title: 'Some captions are ready',
     description: 'Some humor flavors could not finish. Showing the captions that succeeded.',
   })
+  const nudgeValidation = validateNudge(nudge)
+  const nudgeError = nudgeValidation.ok ? null : nudgeValidation.error
   const itemsPerPageOptions = [4, 8, 12, 16, 20, 24]
   const hasMoreCommonImages = commonUseImages.length < commonUseTotalCount
   const isInitialCommonImagesLoading = isLoadingCommonImages && commonUsePage === 1
@@ -250,6 +256,13 @@ export function GenerateRoasts({
     }
   }
 
+  // File, drag-and-drop and URL uploads all capture the nudge here.
+  // It is validated only for now: nothing saves it or sends it to the caption API yet.
+  const captureNudge = () => {
+    if (nudgeError) toast({ title: 'Check your nudge', description: nudgeError })
+    return nudgeValidation
+  }
+
   const handleFileUpload = async (files: File[]) => {
     if (files.length === 0) return
 
@@ -262,6 +275,9 @@ export function GenerateRoasts({
       })
       return
     }
+
+    const submittedNudge = captureNudge()
+    if (!submittedNudge.ok) return
 
     const operation = generation.begin(file)
 
@@ -327,6 +343,9 @@ export function GenerateRoasts({
       return
     }
 
+    const submittedNudge = captureNudge()
+    if (!submittedNudge.ok) return
+
     const operation = generation.begin(imageUrl)
 
     try {
@@ -363,6 +382,7 @@ export function GenerateRoasts({
 
   const resetUploader = () => {
     setImageUrl('')
+    setNudge('')
     setImageId(null)
     setImagePreview(null)
     setRoasts([])
@@ -498,6 +518,47 @@ export function GenerateRoasts({
             {/* Choose your own section */}
             <div className="space-y-2 sm:space-y-3 md:space-y-4 mb-8 mt-4">
               <div className="space-y-3 sm:space-y-4 md:space-y-5">
+                <div className="space-y-2">
+                  <Label htmlFor="caption-nudge" className="text-sm md:text-base">
+                    Give the AI a nudge (optional)
+                  </Label>
+                  <p id="caption-nudge-help" className="text-xs sm:text-sm text-muted-foreground">
+                    Give your meme some extra context, like a class, campus experience, or
+                    inside joke.
+                  </p>
+                  <Textarea
+                    id="caption-nudge"
+                    value={nudge}
+                    onChange={(event) => setNudge(event.target.value)}
+                    maxLength={MAX_NUDGE_LENGTH}
+                    rows={2}
+                    placeholder="e.g., A Columbia class where the midterm average was 42%."
+                    aria-describedby={[
+                      'caption-nudge-help',
+                      'caption-nudge-note',
+                      ...(nudgeError ? ['caption-nudge-error'] : []),
+                    ].join(' ')}
+                    aria-invalid={nudgeError ? true : undefined}
+                    className="min-h-[72px] resize-none rounded-xl border-2 border-primary/50
+                               bg-transparent focus-visible:border-primary focus-visible:ring-0
+                               focus-visible:ring-offset-0"
+                  />
+                  <div className="flex items-start justify-between gap-3">
+                    <p id="caption-nudge-note" className="text-xs text-muted-foreground">
+                      Applies to new uploads and image links only, not shared banger images.
+                      Please avoid sharing private or sensitive information.
+                    </p>
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                      {nudge.length}/{MAX_NUDGE_LENGTH}
+                    </span>
+                  </div>
+                  {nudgeError && (
+                    <p id="caption-nudge-error" role="alert" className="text-xs text-destructive">
+                      {nudgeError}
+                    </p>
+                  )}
+                </div>
+
                 <div className="flex items-center gap-1 sm:gap-2 md:gap-3">
                   <Button
                     className="flex-1 h-[36px] sm:h-[40px] md:h-[44px] bg-primary/10
