@@ -46,3 +46,8 @@ next-env.d.ts
 
 IntelliJ
 .idea
+
+# Local environment files
+.env
+.env.*
+!.env.example
