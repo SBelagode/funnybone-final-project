@@ -11,6 +11,8 @@ import {
   fetchCommonUseCategoriesAction,
   fetchCommonUseImagesAction,
   fetchImagesWithCaptionsAction,
+  getNudgeAvailabilityAction,
+  updateImageNudgeAction,
 } from '@/app/actions/images'
 import { checkAuthStatusAction } from '@/app/actions/auth/check-auth-status'
 import { FileUpload } from '@/components/ui/file-upload'
@@ -45,6 +47,7 @@ import { toggleCaptionSave } from '@/utils/toggle-caption-save'
 import { roastAgain as roastAgainUtil } from '@/utils/roast-again'
 import { hasValidImageExtension, validExtensions } from '@/utils/valid-extension'
 import { MAX_NUDGE_LENGTH, validateNudge } from '@/utils/image-nudge'
+import { generateAfterSavingNudge, prepareNudgeForUpload } from '@/utils/nudge-upload-flow'
 import { loadSavedCaptionIds } from '@/utils/saved-caption-ids'
 import { buildCaptionShareUrl } from '@/utils/site-url'
 import { useCaptionGeneration } from '@/hooks/useCaptionGeneration'
@@ -256,11 +259,11 @@ export function GenerateRoasts({
     }
   }
 
-  // File, drag-and-drop and URL uploads all capture the nudge here.
-  // It is validated only for now: nothing saves it or sends it to the caption API yet.
-  const captureNudge = () => {
-    if (nudgeError) toast({ title: 'Check your nudge', description: nudgeError })
-    return nudgeValidation
+  // File, drag-and-drop and URL uploads all capture the nudge here, before anything uploads.
+  const captureNudge = async () => {
+    const submitted = await prepareNudgeForUpload(nudgeValidation, getNudgeAvailabilityAction)
+    if (!submitted.ok) toast({ title: 'Your nudge wasn’t used', description: submitted.error })
+    return submitted
   }
 
   const handleFileUpload = async (files: File[]) => {
@@ -276,7 +279,7 @@ export function GenerateRoasts({
       return
     }
 
-    const submittedNudge = captureNudge()
+    const submittedNudge = await captureNudge()
     if (!submittedNudge.ok) return
 
     const operation = generation.begin(file)
@@ -294,13 +297,21 @@ export function GenerateRoasts({
       operation.signal.throwIfAborted()
       const uploadedImageId = await uploadImageFromUrl(cdnUrl, false, operation.signal)
       operation.signal.throwIfAborted()
-      if (operation.isCurrent()) {
-        setImageId(uploadedImageId)
-        setImagePreview(cdnUrl)
-      }
-      const captions = await generateCaptions(uploadedImageId, {
-        ...operation,
-        onPartialFailure: () => { if (operation.isCurrent()) notifyPartialFailure() },
+      const captions = await generateAfterSavingNudge({
+        imageId: uploadedImageId,
+        nudge: submittedNudge.nudge,
+        signal: operation.signal,
+        saveNudge: updateImageNudgeAction,
+        onImageReady: () => {
+          if (operation.isCurrent()) {
+            setImageId(uploadedImageId)
+            setImagePreview(cdnUrl)
+          }
+        },
+        generate: () => generateCaptions(uploadedImageId, {
+          ...operation,
+          onPartialFailure: () => { if (operation.isCurrent()) notifyPartialFailure() },
+        }),
       })
       operation.complete(captions)
       if (!operation.isCurrent()) return
@@ -343,7 +354,7 @@ export function GenerateRoasts({
       return
     }
 
-    const submittedNudge = captureNudge()
+    const submittedNudge = await captureNudge()
     if (!submittedNudge.ok) return
 
     const operation = generation.begin(imageUrl)
@@ -351,13 +362,21 @@ export function GenerateRoasts({
     try {
       const uploadedImageId = await uploadImageFromUrl(imageUrl, false, operation.signal)
       operation.signal.throwIfAborted()
-      if (operation.isCurrent()) {
-        setImagePreview(imageUrl)
-        setImageId(uploadedImageId)
-      }
-      const captions = await generateCaptions(uploadedImageId, {
-        ...operation,
-        onPartialFailure: () => { if (operation.isCurrent()) notifyPartialFailure() },
+      const captions = await generateAfterSavingNudge({
+        imageId: uploadedImageId,
+        nudge: submittedNudge.nudge,
+        signal: operation.signal,
+        saveNudge: updateImageNudgeAction,
+        onImageReady: () => {
+          if (operation.isCurrent()) {
+            setImagePreview(imageUrl)
+            setImageId(uploadedImageId)
+          }
+        },
+        generate: () => generateCaptions(uploadedImageId, {
+          ...operation,
+          onPartialFailure: () => { if (operation.isCurrent()) notifyPartialFailure() },
+        }),
       })
       operation.complete(captions)
       if (!operation.isCurrent()) return
@@ -894,6 +913,7 @@ export function GenerateRoasts({
               hasNext={currentCaptionIndex < roasts.length - 1}
               currentIndex={currentCaptionIndex}
               totalCount={roasts.length}
+              tone="auto"
             />
 
             {/* Action Buttons */}

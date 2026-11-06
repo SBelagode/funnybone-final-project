@@ -229,6 +229,7 @@ export function ImageCaptionsPageClient({
             hasNext={currentCaptionIndex < roasts.length - 1}
             currentIndex={currentCaptionIndex}
             totalCount={roasts.length}
+            tone="auto"
           />
 
           <div
