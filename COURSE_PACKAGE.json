@@ -1,0 +1,11 @@
+{
+  "semester": "Fall 2026",
+  "repository": "The-Humor-Project/funnybone",
+  "source_commit": "ed536ef042a503c8ac28a96b57215b621f8f2462",
+  "node_version": "24.x",
+  "excluded_files": [".env", ".env.production", ".env.staging"],
+  "added_files": [".env.example", "COURSE_SETUP.md", "COURSE_PACKAGE.json"],
+  "deadline_eastern": "2026-12-06T23:59:00-05:00",
+  "deadline_utc": "2026-12-07T04:59:00.000Z",
+  "late_submissions_allowed": false
+}
