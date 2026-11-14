@@ -31,3 +31,10 @@ Saving is off unless the server-only variable `ENABLE_NUDGE_PERSISTENCE` is exac
 The saved nudge stays on the image, so **Crack Again** reuses it. Shared images never take a nudge. Changing the nudge on an existing image is not supported yet: the pending job key does not include the nudge, so it could resume an older job.
 
 Tests named `[mock]` stub Supabase and the caption API. `scripts/mock-caption-api.mjs` is a local stand-in for manual checks against real RLS, not the course API. It only captions images that the running process created for the signed-in user: each must be in its in-memory list, end in the run's `#mock-caption-api=<run id>` URL marker, and still be owned, unshared and unpublished. Other images get a 403, and restarting it refuses earlier mock images. Uploaded files stay in its memory only, so their previews stop working after a restart. Its captions have `metadata.source = 'mock-caption-api'` and no `profile_id`, which hides the Post button. They are not private, because the restored database has no RLS on `captions`, so use made-up nudges only.
+
+## Choosing an image before generating
+
+On `/new`, the file picker, drag-and-drop and **Enter Link** only choose an image. The page shows a preview (a browser object URL for local files, the link itself for URLs) and makes no request until **Generate Captions** is clicked. The nudge can be written or changed while viewing the preview, and its value at the moment of the click is the one validated and saved. Upload, nudge save and generation then run in the same order as before.
+
+Replacing or removing the image keeps the nudge. Each local preview URL is revoked when the image is replaced, removed, generated or the page unmounts. A failed generation keeps the image selected so the user can retry. A click guard set synchronously on click prevents a second generation from starting, and cancelling the first, before the button re-renders as disabled. **Continue browsing** releases the guard so another image can be generated while the first runs in the background.
+

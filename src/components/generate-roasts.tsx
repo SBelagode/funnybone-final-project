@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   generateCaptions,
   generatePresignedUrl,
@@ -46,11 +46,14 @@ import { uploadImageViaSignedUrl } from '@/utils/upload-image-signed-url'
 import { toggleCaptionSave } from '@/utils/toggle-caption-save'
 import { roastAgain as roastAgainUtil } from '@/utils/roast-again'
 import { hasValidImageExtension, validExtensions } from '@/utils/valid-extension'
-import { MAX_NUDGE_LENGTH, validateNudge } from '@/utils/image-nudge'
+import { MAX_NUDGE_LENGTH, type NudgeValidation, validateNudge } from '@/utils/image-nudge'
 import { generateAfterSavingNudge, prepareNudgeForUpload } from '@/utils/nudge-upload-flow'
 import { loadSavedCaptionIds } from '@/utils/saved-caption-ids'
 import { buildCaptionShareUrl } from '@/utils/site-url'
 import { useCaptionGeneration } from '@/hooks/useCaptionGeneration'
+
+// A chosen image waits here until Generate is clicked. Nothing is uploaded or saved before then.
+type SelectedImage = { kind: 'file'; file: File } | { kind: 'url'; url: string }
 
 function isValidUrl(url: string) {
   try {
@@ -93,6 +96,13 @@ export function GenerateRoasts({
   const [isUrlModalOpen, setIsUrlModalOpen] = useState(false)
   const [currentCaptionIndex, setCurrentCaptionIndex] = useState(0)
   const [userId, setUserId] = useState<string | null>(null)
+  const [selectedImage, setSelectedImage] = useState<SelectedImage | null>(null)
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null)
+  const [previewFailed, setPreviewFailed] = useState(false)
+  const [isStarting, setIsStarting] = useState(false)
+  // Set synchronously on click, so a second click cannot start (and cancel) another generation
+  // before React re-renders the disabled button.
+  const activeGeneration = useRef<object | null>(null)
   const { toast } = useToast()
   const router = useRouter()
   const notifyPartialFailure = () => toast({
@@ -101,6 +111,20 @@ export function GenerateRoasts({
   })
   const nudgeValidation = validateNudge(nudge)
   const nudgeError = nudgeValidation.ok ? null : nudgeValidation.error
+  const selectedFile = selectedImage?.kind === 'file' ? selectedImage.file : null
+  const selectedPreviewSrc = selectedImage?.kind === 'url' ? selectedImage.url : filePreviewUrl
+  const canGenerate = Boolean(selectedImage) && !isStarting && !isLoading && !nudgeError
+
+  // Each local file gets its own object URL, revoked when it is replaced, removed or unmounted.
+  useEffect(() => {
+    if (!selectedFile) {
+      setFilePreviewUrl(null)
+      return
+    }
+    const url = URL.createObjectURL(selectedFile)
+    setFilePreviewUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [selectedFile])
   const itemsPerPageOptions = [4, 8, 12, 16, 20, 24]
   const hasMoreCommonImages = commonUseImages.length < commonUseTotalCount
   const isInitialCommonImagesLoading = isLoadingCommonImages && commonUsePage === 1
@@ -259,17 +283,21 @@ export function GenerateRoasts({
     }
   }
 
-  // File, drag-and-drop and URL uploads all capture the nudge here, before anything uploads.
-  const captureNudge = async () => {
-    const submitted = await prepareNudgeForUpload(nudgeValidation, getNudgeAvailabilityAction)
+  const captureNudge = async (validation: NudgeValidation) => {
+    const submitted = await prepareNudgeForUpload(validation, getNudgeAvailabilityAction)
     if (!submitted.ok) toast({ title: 'Your nudge wasn’t used', description: submitted.error })
     return submitted
   }
 
-  const handleFileUpload = async (files: File[]) => {
-    if (files.length === 0) return
+  const selectImage = (image: SelectedImage) => {
+    setSelectedImage(image)
+    setPreviewFailed(false)
+  }
 
+  // The file picker and drag-and-drop only choose an image. Generation waits for the button.
+  const handleFileSelect = (files: File[]) => {
     const file = files[0]
+    if (!file) return
     if (!hasValidImageExtension(file.name)) {
       toast({
         title: 'Invalid Image Type',
@@ -278,64 +306,12 @@ export function GenerateRoasts({
       })
       return
     }
-
-    const submittedNudge = await captureNudge()
-    if (!submittedNudge.ok) return
-
-    const operation = generation.begin(file)
-
-    try {
-      const contentType = `image/${file.type.split('/')[1]}`
-
-      const presignedUrlResponse = await generatePresignedUrl(contentType, operation.signal)
-
-      const presignedUrl = presignedUrlResponse.presignedUrl
-      const cdnUrl = presignedUrlResponse.cdnUrl
-
-      await uploadImageViaSignedUrl(file, presignedUrl, operation.signal)
-
-      operation.signal.throwIfAborted()
-      const uploadedImageId = await uploadImageFromUrl(cdnUrl, false, operation.signal)
-      operation.signal.throwIfAborted()
-      const captions = await generateAfterSavingNudge({
-        imageId: uploadedImageId,
-        nudge: submittedNudge.nudge,
-        signal: operation.signal,
-        saveNudge: updateImageNudgeAction,
-        onImageReady: () => {
-          if (operation.isCurrent()) {
-            setImageId(uploadedImageId)
-            setImagePreview(cdnUrl)
-          }
-        },
-        generate: () => generateCaptions(uploadedImageId, {
-          ...operation,
-          onPartialFailure: () => { if (operation.isCurrent()) notifyPartialFailure() },
-        }),
-      })
-      operation.complete(captions)
-      if (!operation.isCurrent()) return
-      setRoasts(captions)
-      setCurrentCaptionIndex(0)
-
-      if (onRoastsGenerated) {
-        onRoastsGenerated()
-      }
-    } catch (error) {
-      operation.fail(error)
-      if (!operation.isCurrent()) return
-      console.error('Error generating jokes:', error)
-      toast({
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to generate jokes.',
-      })
-    } finally {
-      operation.finish()
-    }
+    selectImage({ kind: 'file', file })
   }
 
-  const handleUrlUpload = async () => {
-    if (!isValidUrl(imageUrl)) {
+  const handleUrlSelect = () => {
+    const url = imageUrl.trim()
+    if (!isValidUrl(url)) {
       toast({
         title: 'Invalid URL',
         description:
@@ -345,7 +321,7 @@ export function GenerateRoasts({
     }
 
     // Check if URL has a valid image extension
-    if (!hasValidImageExtension(imageUrl)) {
+    if (!hasValidImageExtension(url)) {
       toast({
         title: 'Invalid Image Type',
         description: `Please enter a URL with one of these image types: 
@@ -353,24 +329,49 @@ export function GenerateRoasts({
       })
       return
     }
+    selectImage({ kind: 'url', url })
+  }
 
-    const submittedNudge = await captureNudge()
-    if (!submittedNudge.ok) return
+  // Removing the image keeps the nudge, so the user can pick another image for the same idea.
+  const removeSelectedImage = () => {
+    setSelectedImage(null)
+    setPreviewFailed(false)
+  }
 
-    const operation = generation.begin(imageUrl)
+  const openFilePicker = () => {
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    if (fileInput) fileInput.click()
+  }
 
+  const runGeneration = async (
+    image: SelectedImage,
+    nudge: string | null,
+    operation: ReturnType<typeof generation.begin>,
+  ) => {
     try {
-      const uploadedImageId = await uploadImageFromUrl(imageUrl, false, operation.signal)
+      let uploadedImageId: string
+      let uploadedImageUrl: string
+      if (image.kind === 'file') {
+        const contentType = `image/${image.file.type.split('/')[1]}`
+        const { presignedUrl, cdnUrl } = await generatePresignedUrl(contentType, operation.signal)
+        await uploadImageViaSignedUrl(image.file, presignedUrl, operation.signal)
+        operation.signal.throwIfAborted()
+        uploadedImageId = await uploadImageFromUrl(cdnUrl, false, operation.signal)
+        uploadedImageUrl = cdnUrl
+      } else {
+        uploadedImageId = await uploadImageFromUrl(image.url, false, operation.signal)
+        uploadedImageUrl = image.url
+      }
       operation.signal.throwIfAborted()
       const captions = await generateAfterSavingNudge({
         imageId: uploadedImageId,
-        nudge: submittedNudge.nudge,
+        nudge,
         signal: operation.signal,
         saveNudge: updateImageNudgeAction,
         onImageReady: () => {
           if (operation.isCurrent()) {
-            setImagePreview(imageUrl)
             setImageId(uploadedImageId)
+            setImagePreview(uploadedImageUrl)
           }
         },
         generate: () => generateCaptions(uploadedImageId, {
@@ -380,6 +381,7 @@ export function GenerateRoasts({
       })
       operation.complete(captions)
       if (!operation.isCurrent()) return
+      setSelectedImage(null)
       setRoasts(captions)
       setCurrentCaptionIndex(0)
 
@@ -389,13 +391,34 @@ export function GenerateRoasts({
     } catch (error) {
       operation.fail(error)
       if (!operation.isCurrent()) return
-      console.error('Error generating jokes from URL:', error)
+      console.error('Error generating captions:', error)
       toast({
         title: 'Error',
         description: error instanceof Error ? error.message : 'Failed to generate jokes.',
       })
     } finally {
       operation.finish()
+    }
+  }
+
+  const handleGenerate = async () => {
+    const image = selectedImage
+    if (!image || activeGeneration.current) return
+    const token = {}
+    activeGeneration.current = token
+    setIsStarting(true)
+    try {
+      // Read the nudge now, not at selection, so edits made while viewing the image count.
+      const submittedNudge = await captureNudge(nudgeValidation)
+      if (!submittedNudge.ok) return
+      const operation = generation.begin(image.kind === 'file' ? image.file : image.url)
+      await runGeneration(image, submittedNudge.nudge, operation)
+    } finally {
+      // Continue browsing may have released this already; never release a newer generation.
+      if (activeGeneration.current === token) {
+        activeGeneration.current = null
+        setIsStarting(false)
+      }
     }
   }
 
@@ -406,10 +429,15 @@ export function GenerateRoasts({
     setImagePreview(null)
     setRoasts([])
     setCurrentCaptionIndex(0)
+    setSelectedImage(null)
+    setPreviewFailed(false)
   }
 
   const handleContinueBrowsing = () => {
     generation.continueBrowsing()
+    // The detached generation keeps running in the background, so a new one can start here.
+    activeGeneration.current = null
+    setIsStarting(false)
     resetUploader()
   }
 
@@ -537,6 +565,120 @@ export function GenerateRoasts({
             {/* Choose your own section */}
             <div className="space-y-2 sm:space-y-3 md:space-y-4 mb-8 mt-4">
               <div className="space-y-3 sm:space-y-4 md:space-y-5">
+                {selectedImage ? (
+                  <div
+                    className="space-y-2"
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      const droppedFile = event.dataTransfer.files?.[0]
+                      if (droppedFile && !isStarting) handleFileSelect([droppedFile])
+                    }}
+                  >
+                    <div
+                      className="flex min-h-[160px] items-center justify-center overflow-hidden
+                                 rounded-2xl border-2 border-primary/30 bg-muted/30"
+                    >
+                      {selectedPreviewSrc && !previewFailed ? (
+                        // Local previews are blob URLs, which next/image does not optimize.
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={selectedPreviewSrc}
+                          alt="Selected image preview"
+                          className="max-h-[360px] w-auto max-w-full object-contain"
+                          onError={() => setPreviewFailed(true)}
+                        />
+                      ) : (
+                        <p className="px-4 text-center text-sm text-muted-foreground">
+                          {selectedPreviewSrc
+                            ? 'We couldn’t show a preview of this image, but you can still try it.'
+                            : 'Preparing preview…'}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                        {selectedImage.kind === 'file'
+                          ? selectedImage.file.name
+                          : selectedImage.url}
+                      </p>
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={openFilePicker}
+                          disabled={isStarting}
+                        >
+                          Replace photo
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setIsUrlModalOpen(true)}
+                          disabled={isStarting}
+                        >
+                          Use a link
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={removeSelectedImage}
+                          disabled={isStarting}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1 sm:gap-2 md:gap-3">
+                    <Button
+                      className="flex-1 h-[36px] sm:h-[40px] md:h-[44px] bg-primary/10
+                                 backdrop-blur-sm text-primary rounded-3xl hover:bg-primary/20
+                                 transition-all duration-300 text-xs sm:text-sm md:text-base
+                                 touch-manipulation border-2 border-primary/50
+                                 hover:border-primary"
+                      onClick={openFilePicker}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        const fileInput = event.dataTransfer.files?.[0]
+                        if (fileInput) {
+                          handleFileSelect([fileInput])
+                        }
+                      }}
+                    >
+                      <div className="flex items-center gap-2">Upload Photo</div>
+                    </Button>
+
+                    <div className="flex items-center gap-1 sm:gap-2 md:gap-3">
+                      <div className="h-[1px] w-4 sm:w-6 md:w-8 bg-primary/20"></div>
+                      <span
+                        className="text-[10px] xs:text-xs sm:text-sm md:text-base
+                                       text-muted-foreground whitespace-nowrap"
+                      >
+                        or
+                      </span>
+                      <div className="h-[1px] w-4 sm:w-6 md:w-8 bg-primary/20"></div>
+                    </div>
+
+                    <Button
+                      className="flex-1 h-[36px] sm:h-[40px] md:h-[44px] bg-primary/10
+                                 backdrop-blur-sm text-primary rounded-3xl hover:bg-primary/20
+                                 transition-all duration-300 text-xs sm:text-sm md:text-base
+                                 touch-manipulation border-2 border-primary/50
+                                 hover:border-primary"
+                      onClick={() => setIsUrlModalOpen(true)}
+                    >
+                      <div className="flex items-center gap-2">Enter Link</div>
+                    </Button>
+                  </div>
+
+                )}
+
                 <div className="space-y-2">
                   <Label htmlFor="caption-nudge" className="text-sm md:text-base">
                     Give the AI a nudge (optional)
@@ -578,57 +720,32 @@ export function GenerateRoasts({
                   )}
                 </div>
 
-                <div className="flex items-center gap-1 sm:gap-2 md:gap-3">
-                  <Button
-                    className="flex-1 h-[36px] sm:h-[40px] md:h-[44px] bg-primary/10
-                               backdrop-blur-sm text-primary rounded-3xl hover:bg-primary/20
-                               transition-all duration-300 text-xs sm:text-sm md:text-base
-                               touch-manipulation border-2 border-primary/50
-                               hover:border-primary"
-                    onClick={() => {
-                      const fileInput = document.querySelector(
-                        'input[type="file"]'
-                      ) as HTMLInputElement
-                      if (fileInput) fileInput.click()
-                    }}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={(event) => {
-                      event.preventDefault()
-                      const fileInput = event.dataTransfer.files?.[0]
-                      if (fileInput) {
-                        handleFileUpload([fileInput])
-                      }
-                    }}
-                  >
-                    <div className="flex items-center gap-2">Upload Photo</div>
-                  </Button>
 
-                  <div className="flex items-center gap-1 sm:gap-2 md:gap-3">
-                    <div className="h-[1px] w-4 sm:w-6 md:w-8 bg-primary/20"></div>
-                    <span
-                      className="text-[10px] xs:text-xs sm:text-sm md:text-base
-                                     text-muted-foreground whitespace-nowrap"
-                    >
-                      or
-                    </span>
-                    <div className="h-[1px] w-4 sm:w-6 md:w-8 bg-primary/20"></div>
-                  </div>
-
+                <div className="space-y-1">
                   <Button
-                    className="flex-1 h-[36px] sm:h-[40px] md:h-[44px] bg-primary/10
-                               backdrop-blur-sm text-primary rounded-3xl hover:bg-primary/20
-                               transition-all duration-300 text-xs sm:text-sm md:text-base
-                               touch-manipulation border-2 border-primary/50
-                               hover:border-primary"
-                    onClick={() => setIsUrlModalOpen(true)}
+                    type="button"
+                    className="h-[40px] w-full rounded-3xl text-sm sm:h-[44px] sm:text-base"
+                    onClick={handleGenerate}
+                    disabled={!canGenerate}
+                    aria-describedby="generate-captions-hint"
                   >
-                    <div className="flex items-center gap-2">Enter Link</div>
+                    {isStarting ? 'Starting…' : 'Generate Captions'}
                   </Button>
+                  <p
+                    id="generate-captions-hint"
+                    className="text-center text-xs text-muted-foreground"
+                  >
+                    {!selectedImage
+                      ? 'Choose a photo or link to get started.'
+                      : nudgeError
+                        ? 'Fix your nudge to continue.'
+                        : 'Captions start only when you click Generate.'}
+                  </p>
                 </div>
 
                 <div className="hidden">
                   <FileUpload
-                    onChange={handleFileUpload}
+                    onChange={handleFileSelect}
                     accept={{
                       'image/*': Array.from(validExtensions),
                     }}
@@ -983,7 +1100,7 @@ export function GenerateRoasts({
         <UrlInputModal
           isOpen={isUrlModalOpen}
           onClose={() => setIsUrlModalOpen(false)}
-          onSubmit={handleUrlUpload}
+          onSubmit={handleUrlSelect}
           currentUrl={imageUrl}
           setCurrentUrl={setImageUrl}
         />

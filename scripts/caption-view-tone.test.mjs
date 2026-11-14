@@ -29,6 +29,7 @@ function render(path, exportName, props, seeded = {}) {
     react: {
       useCallback: callback => callback,
       useEffect: () => {},
+      useRef: initial => ({ current: initial }),
       useState(initial) {
         const index = slot++
         return [index in seeded ? seeded[index] : initial, () => {}]

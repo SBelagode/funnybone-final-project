@@ -72,7 +72,7 @@ export function UrlInputModal({
                 "h-[36px] sm:h-[40px] md:h-[44px] text-sm sm:text-base md:text-lg",
               ].join(" ")}
             >
-              Crack
+              Use image
             </Button>
           </div>
         </div>
