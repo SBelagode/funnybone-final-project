@@ -1,5 +1,6 @@
 'use client'
 
+import { displayImageUrl } from '@/utils/display-image-url'
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import Link from 'next/link'
@@ -31,7 +32,7 @@ function CaptionImageThumbnail({ imageUrl, alt }: {
         // Local uploads use a blob URL before a hosted image is available.
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={imageUrl}
+          src={displayImageUrl(imageUrl)}
           alt={alt}
           className="h-full w-full object-cover"
           onError={() => setImageFailed(true)}

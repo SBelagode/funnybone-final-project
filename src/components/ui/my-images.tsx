@@ -1,3 +1,4 @@
+import { displayImageUrl } from '@/utils/display-image-url'
 import { useRef, useState } from 'react';
 import { IconChevronDown } from '@tabler/icons-react'
 import { MyImagesGridSkeleton } from '@/components/ui/image-grid-skeleton'
@@ -153,7 +154,7 @@ export const PhotoTabContent = ({
                   onClick={() => handleImageSelect(image.id)}
                 >
                   <img
-                    src={displayUrl}
+                    src={displayImageUrl(displayUrl)}
                     srcSet={srcSet}
                     sizes={GRID_SIZES}
                     alt={`Image ${image.id}`}

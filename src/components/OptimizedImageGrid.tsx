@@ -1,3 +1,4 @@
+import { displayImageUrl } from '@/utils/display-image-url'
 import React, { useState } from 'react';
 
 // thumbnail sizes
@@ -89,7 +90,7 @@ const ImageGridItem: React.FC<ImageGridItemProps> = ({
         <>
           <div className="absolute inset-0 hidden sm:block">
             <img
-              src={blurUrl}
+              src={displayImageUrl(blurUrl)}
               alt=""
               className="w-full h-full object-cover blur-xl opacity-30"
               loading="lazy"
@@ -98,7 +99,7 @@ const ImageGridItem: React.FC<ImageGridItemProps> = ({
           
           <div className="absolute inset-0 flex items-center justify-center p-4">
             <img
-              src={displayUrl}
+              src={displayImageUrl(displayUrl)}
               srcSet={srcSet}
               sizes="(max-width: 640px) 640px, (max-width: 768px) 400px, 300px"
               alt="Selectable image"
@@ -139,7 +140,7 @@ const ImageGridItem: React.FC<ImageGridItemProps> = ({
       {!imageLoaded && !imageError && (
         <div className="absolute inset-0 flex items-center justify-center p-4">
           <img
-            src={displayUrl}
+            src={displayImageUrl(displayUrl)}
             srcSet={srcSet}
             sizes="(max-width: 640px) 640px, (max-width: 768px) 400px, 300px"
             alt="Selectable image"

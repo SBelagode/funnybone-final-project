@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound, redirect } from 'next/navigation'
 
+import { verifiedAccessToken } from '@/utils/access-token'
 import { createClient } from '@/utils/supabase/server'
 import type { Caption } from '@/utils/types'
 import type { Database } from '@/types/supabase'
@@ -15,12 +16,10 @@ export default async function CaptionJobPage({ params }: Props) {
   if (!uuid.test(jobId)) return notFound()
 
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user || user.is_anonymous || user.app_metadata?.provider === 'anonymous') {
-    return redirect('/login')
-  }
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session?.access_token || session.user.id !== user.id) return redirect('/login')
+  // Verified identity; the cookie session supplies only the token (see utils/access-token).
+  const verified = await verifiedAccessToken(supabase)
+  if (!verified.ok) return redirect('/login')
+  const session = { access_token: verified.accessToken }
 
   const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL
   if (!apiUrl) throw new Error('API base URL is not defined.')

@@ -13,6 +13,11 @@ import { fetchPopularCaptionsByImageIdAction, generateCaptions } from '@/app/act
 import type { Caption } from '@/utils/types'
 import { buildCaptionShareUrl } from '@/utils/site-url'
 import { useCaptionGeneration } from '@/hooks/useCaptionGeneration'
+import {
+  captionGenerationAvailability,
+  GENERATION_BLOCK_MESSAGES,
+  type GenerationBlock,
+} from '@/utils/caption-generation-availability'
 
 type ImageCaptionsPageClientProps = {
   imageId: string
@@ -29,6 +34,46 @@ type PopularCaptionRow = {
   is_public: boolean
   profile_id: string
   humor_flavor_id?: number | null
+}
+
+type GenerationResult =
+  | { captions: Caption[]; reason: null; error: null }
+  | { captions: null; reason: GenerationBlock | null; error: unknown }
+
+const failureMessage = (result: Extract<GenerationResult, { captions: null }>) =>
+  result.reason ? GENERATION_BLOCK_MESSAGES[result.reason]
+    : result.error instanceof Error ? result.error.message : 'New captions couldn’t be generated.'
+
+type GenerationOperation = ReturnType<ReturnType<typeof useCaptionGeneration>['begin']>
+
+// Asks the caption API only when it is configured and has not already refused or failed.
+// A failure is recorded and returned, never thrown, so existing captions stay on screen.
+async function generateIfAvailable({ imageId, isCommonUse, operation, automatic, toast }: {
+  imageId: string
+  isCommonUse: boolean
+  operation: GenerationOperation
+  automatic: boolean
+  toast: ReturnType<typeof useToast>['toast']
+}): Promise<GenerationResult> {
+  const availability = captionGenerationAvailability
+  const gate = availability.check(imageId, { isCommonUse, automatic })
+  if (!gate.ok) return { captions: null, reason: gate.reason, error: null }
+  try {
+    const captions = await generateCaptions(imageId, {
+      ...operation,
+      onPartialFailure: () => operation.isCurrent() && toast({
+        title: 'Some captions are ready',
+        description: 'Some humor flavors could not finish. Showing successful captions.',
+      }),
+    })
+    availability.recordSuccess(imageId)
+    return { captions, reason: null, error: null }
+  } catch (error) {
+    operation.signal.throwIfAborted()
+    console.error('Caption generation unavailable:', error)
+    return { captions: null, error,
+      reason: availability.recordFailure(imageId, error, { isCommonUse }) }
+  }
 }
 
 const normalizeCaption = (caption: PopularCaptionRow): Caption => ({
@@ -54,43 +99,55 @@ export function ImageCaptionsPageClient({
   const [popularCaptions, setPopularCaptions] = useState<Caption[]>([])
   const [popularOffset, setPopularOffset] = useState(0)
   const [userId, setUserId] = useState<string | null>(null)
+  // Shown under the captions when new ones could not be added, or as the empty state.
+  const [notice, setNotice] = useState<string | null>(null)
   const { toast } = useToast()
   const router = useRouter()
+  const availability = captionGenerationAvailability
+  // Existing captions are always shown; generation only adds to them when it can work.
+  const canRequestMore = availability.check(imageId, { isCommonUse, automatic: false }).ok
+  const tryGenerate = (operation: GenerationOperation, automatic: boolean) =>
+    generateIfAvailable({ imageId, isCommonUse, operation, automatic, toast })
 
   const handleRoastAgain = async () => {
+    const target = maxCaptions
+    // Saved captions not shown yet come first; generation tops them up.
+    const remaining = isCommonUse
+      ? popularCaptions.slice(popularOffset, popularOffset + target) : []
+    const show = (captions: Caption[], fromSaved: number) => {
+      if (fromSaved) setPopularOffset(offset => offset + fromSaved)
+      if (!captions.length) return
+      setRoasts(prev => [...captions, ...prev])
+      setCurrentCaptionIndex(0)
+      setNotice(null)
+    }
+    if (remaining.length >= target) {
+      show(remaining, remaining.length)
+      return
+    }
+    const gate = availability.check(imageId, { isCommonUse, automatic: false })
+    if (!gate.ok) {
+      show(remaining, remaining.length)
+      toast({
+        title: remaining.length ? 'These are the last saved captions' : 'No more captions yet',
+        description: GENERATION_BLOCK_MESSAGES[gate.reason],
+      })
+      return
+    }
+
     const operation = begin(imageUrl)
     try {
-      const target = maxCaptions
-      let captions: Caption[] = []
-
-      if (isCommonUse) {
-        if (popularCaptions.length >= popularOffset + target) {
-          captions = popularCaptions.slice(popularOffset, popularOffset + target)
-          setPopularOffset(popularOffset + captions.length)
-        } else {
-          const generatedCaptions = await generateCaptions(imageId, {
-            ...operation,
-            onPartialFailure: () => operation.isCurrent() && toast({
-              title: 'Some captions are ready',
-              description: 'Some humor flavors could not finish. Showing successful captions.',
-            }),
-          })
-          captions = generatedCaptions.slice(0, target)
-        }
-      } else {
-        captions = await generateCaptions(imageId, {
-            ...operation,
-            onPartialFailure: () => operation.isCurrent() && toast({
-              title: 'Some captions are ready',
-              description: 'Some humor flavors could not finish. Showing successful captions.',
-            }),
-          })
-        captions = captions.slice(0, target)
-      }
-
+      const result = await tryGenerate(operation, false)
+      const captions = [...remaining, ...(result.captions ?? [])].slice(0, target)
       operation.complete(captions)
       if (!operation.isCurrent()) return
-      setRoasts((prev) => (prev.length ? [...captions, ...prev] : captions))
+      show(captions, remaining.length)
+      if (!result.captions) {
+        toast({
+          title: captions.length ? 'Showing saved captions' : 'No new captions',
+          description: failureMessage(result),
+        })
+      }
     } catch (error) {
       operation.fail(error)
       if (!operation.isCurrent()) return
@@ -137,45 +194,47 @@ export function ImageCaptionsPageClient({
     if (initialCaptions !== undefined) return
 
     const loadCaptions = async () => {
-      const operation = begin(imageUrl)
       setRoasts([])
       setCurrentCaptionIndex(0)
+      setNotice(null)
+      const gate = captionGenerationAvailability.check(imageId, { isCommonUse, automatic: true })
+      // A private image has no saved captions to load, so there is nothing to wait for.
+      if (!isCommonUse && !gate.ok) {
+        setNotice(GENERATION_BLOCK_MESSAGES[gate.reason])
+        return
+      }
+      const operation = begin(imageUrl)
 
       try {
         const target = maxCaptions
-        let captions: Caption[] = []
-
+        let existing: Caption[] = []
         if (isCommonUse) {
           const popularCaptionsRaw = await fetchPopularCaptionsByImageIdAction(imageId)
           operation.signal.throwIfAborted()
-          const popularCaptionsToSet = (popularCaptionsRaw ?? []).map(normalizeCaption)
-          if (operation.isCurrent()) setPopularCaptions(popularCaptionsToSet)
-
-          if (popularCaptionsToSet.length >= target) {
-            captions = popularCaptionsToSet.slice(0, target)
-          } else {
-            const generatedCaptions = await generateCaptions(imageId, {
-              ...operation,
-              onPartialFailure: () => operation.isCurrent() && toast({
-                title: 'Some captions are ready',
-                description: 'Some humor flavors could not finish. Showing successful captions.',
-              }),
-            })
-            captions = [...popularCaptionsToSet, ...generatedCaptions].slice(0, target)
-          }
-
-          if (operation.isCurrent()) setPopularOffset(captions.length)
-        } else {
-          captions = await generateCaptions(imageId, {
-            ...operation,
-            onPartialFailure: () => operation.isCurrent() && toast({
-              title: 'Some captions are ready',
-              description: 'Some humor flavors could not finish. Showing successful captions.',
-            }),
-          })
-          captions = captions.slice(0, target)
+          existing = (popularCaptionsRaw ?? []).map(normalizeCaption)
+          if (operation.isCurrent()) setPopularCaptions(existing)
         }
 
+        let captions = existing.slice(0, target)
+        if (captions.length < target) {
+          const result = await generateIfAvailable({
+            imageId, isCommonUse, operation, automatic: true, toast,
+          })
+          if (result.captions) {
+            captions = [...captions, ...result.captions].slice(0, target)
+          } else if (operation.isCurrent() && (captions.length === 0
+            || result.reason !== 'not-configured')) {
+            // Keep the saved captions; explain quietly instead of showing an error.
+            setNotice(captions.length
+              ? `Showing ${captions.length} saved caption${captions.length === 1 ? '' : 's'}. `
+                + failureMessage(result)
+              : failureMessage(result))
+          }
+        }
+
+        if (isCommonUse && operation.isCurrent()) {
+          setPopularOffset(Math.min(existing.length, captions.length))
+        }
         operation.complete(captions)
         if (!operation.isCurrent()) return
         setRoasts(captions)
@@ -202,10 +261,14 @@ export function ImageCaptionsPageClient({
 
       {!isLoading && roasts.length === 0 && (
         <div className="w-full max-w-[650px] mx-auto px-4 text-center text-muted-foreground">
-          <p>No captions to show yet.</p>
-          <button onClick={handleRoastAgain} className="mt-4 text-primary underline">
-            Get captions
-          </button>
+          <p role="status">
+            {notice ? `No captions for this image yet. ${notice}` : 'No captions to show yet.'}
+          </p>
+          {canRequestMore && (
+            <button onClick={handleRoastAgain} className="mt-4 text-primary underline">
+              {notice ? 'Try again' : 'Get captions'}
+            </button>
+          )}
         </div>
       )}
 
@@ -231,6 +294,12 @@ export function ImageCaptionsPageClient({
             totalCount={roasts.length}
             tone="auto"
           />
+
+          {notice && (
+            <p role="status" className="mb-3 text-center text-sm text-muted-foreground">
+              {notice}
+            </p>
+          )}
 
           <div
             className="flex flex-row gap-2 sm:gap-4 justify-center items-center 

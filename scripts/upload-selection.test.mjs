@@ -4,7 +4,7 @@ import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { trackObjectUrls } from './support/render-component.mjs'
 import {
-  cdnUrl, deferred, imageId, photo, renderGenerateRoasts,
+  cdnUrl, deferred, imageId, photo, renderGenerateRoasts, storedUrl,
 } from './support/generate-roasts-fixture.mjs'
 
 const link = 'https://example.test/memes/cat.jpg'
@@ -239,7 +239,8 @@ test('[mock] a finished generation shows its captions and frees the preview', as
   await v.settle()
   const result = v.find(node => node.type === v.ui.CaptionViewV2)
   assert.equal(result.props.content, v.caption.content)
-  assert.equal(result.props.imageUrl, cdnUrl)
+  assert.equal(result.props.imageUrl, storedUrl,
+    'the stored image, not the one-time upload target, which is deleted after upload')
   assert.equal(v.preview(), null)
   assert.deepEqual(urls.live(), [])
 })

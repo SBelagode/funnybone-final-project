@@ -1,4 +1,5 @@
 "use client";
+import { displayImageUrl } from '@/utils/display-image-url'
 import React, { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { deleteSaveAction, fetchSavedCaptionsAction } from "@/app/actions/captions";
@@ -318,7 +319,7 @@ export default function SavedCaptionsPage() {
                       <div className="w-full flex-1 min-h-[320px] px-3 pb-3">
                         <div className="relative w-full h-full">
                           <img
-                            src={displayUrl}
+                            src={displayImageUrl(displayUrl)}
                             srcSet={srcSet}
                             sizes="(max-width: 640px) 320px, (max-width: 768px) 320px, 320px"
                             alt={`Caption Image ${caption.id}`}

@@ -65,15 +65,14 @@ export const toggleCaptionVoteAction = async (
     throw deleteError;
   }
 
-  // Insert new vote row
+  // Insert new vote row. Only these columns may be written by users (migration 032); the
+  // audit columns default to auth.uid() and are set by a trigger.
   const { data, error } = await supabase
     .from("caption_votes")
     .insert({
       caption_id: captionId,
       profile_id: user.id,
       vote_value: voteValue,
-      created_by_user_id: user.id,
-      modified_by_user_id: user.id,
     })
     .select()
     .single();

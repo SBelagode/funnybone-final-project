@@ -7,6 +7,7 @@ import {
   REFINEMENT_MODES,
   type RefinementMode,
 } from '@/utils/context-refinement'
+import { verifiedAccessToken } from '@/utils/access-token'
 import { createClient } from '@/utils/supabase/server'
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -69,9 +70,10 @@ async function readOwnImage(session: NonNullable<Awaited<ReturnType<typeof signe
 async function apiState(session: NonNullable<Awaited<ReturnType<typeof signedIn>>>,
   imageId: string): Promise<CaptionApiState | null> {
   try {
-    const { data: { session: auth } } = await session.supabase.auth.getSession()
-    if (!auth?.access_token) return null
-    return await fetchCaptionApiState(imageId, auth.access_token)
+    // The user was verified with getUser(); the token must belong to that same user.
+    const token = await verifiedAccessToken(session.supabase as never)
+    if (!token.ok || token.userId !== session.user.id) return null
+    return await fetchCaptionApiState(imageId, token.accessToken)
   } catch {
     return null
   }

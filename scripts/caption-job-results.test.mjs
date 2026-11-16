@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import ts from 'typescript'
+import { loadModule } from './support/render-component.mjs'
 
 const require = createRequire(import.meta.url)
 const { outputText } = ts.transpileModule(readFileSync(new URL(
@@ -13,7 +14,10 @@ const { outputText } = ts.transpileModule(readFileSync(new URL(
     jsx: ts.JsxEmit.ReactJSX },
 })
 const user = { id: randomUUID(), app_metadata: {} }
-const session = { access_token: 'signed-in-user-jwt', user }
+const jwt = payload => `h.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.s`
+// The page trusts only the verified user; the session supplies a token for that same user.
+const session = { access_token: jwt({ sub: user.id, role: 'authenticated' }) }
+const accessTokenModule = loadModule('utils/access-token.ts')
 const image = { id: randomUUID(), url: '/image.png', is_common_use: true }
 const caption = () => ({ id: randomUUID(), image_id: image.id, content: 'Saved job caption',
   is_public: false, profile_id: user.id, humor_flavor_id: null })
@@ -46,6 +50,7 @@ function loadPage({ rows = [caption()], currentUser = user, currentSession = ses
   const exports = {}
   const mocks = {
     '@/utils/supabase/server': { createClient: async () => { clients++; return supabase } },
+    '@/utils/access-token': accessTokenModule,
     '@/app/image/[imageId]/captions/image-captions-page-client': {
       ImageCaptionsPageClient: () => null,
     },
@@ -122,7 +127,7 @@ test('job results require a verified non-anonymous user and matching session', a
     { currentUser: { ...user, is_anonymous: true } },
     { currentUser: { ...user, app_metadata: { provider: 'anonymous' } } },
     { currentSession: null },
-    { currentSession: { ...session, user: { id: randomUUID() } } },
+    { currentSession: { access_token: jwt({ sub: randomUUID(), role: 'authenticated' }) } },
   ]) {
     const page = loadPage(options)
     await assert.rejects(page.render(), /REDIRECT:\/login/)

@@ -12,7 +12,8 @@ const contextRefinement = loadModule('utils/context-refinement.ts',
   { '@/utils/image-nudge': imageNudge })
 const user = { id: randomUUID(), app_metadata: {} }
 const otherUser = randomUUID()
-const token = 'user-access-token'
+const token = `h.${Buffer.from(JSON.stringify({ sub: user.id, role: 'authenticated' }))
+  .toString('base64url')}.s`
 const supported = { supportsContextSnapshots: true, activeJob: false }
 
 let rows
@@ -92,6 +93,7 @@ function loadAction({ currentUser = user, session = { access_token: token },
     '@/utils/supabase/server': {
       createClient: async () => { calls.clients += 1; return supabase },
     },
+    '@/utils/access-token': loadModule('utils/access-token.ts'),
   })
   const updates = () => calls.queries.filter(query => query.op === 'update')
   return { ...actions, calls, updates }

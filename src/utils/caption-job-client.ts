@@ -131,18 +131,38 @@ export async function runCaptionJob<T>(imageId: string, options: ClientOptions<T
         } : {}),
       })
       if (response.status === 409) {
-        const code = String((await response.json().catch(() => null))?.code ?? 'conflict')
+        // The mock puts the code at the top level; Nonchalant (h3) nests it under data.
+        const body = await response.json().catch(() => null)
+        const code = String(body?.code ?? body?.data?.code ?? 'conflict')
         throw new CaptionJobRequestError(409, code === 'generation_in_progress'
           ? 'Captions are already being generated for this image. Wait for them to finish, '
             + 'then try again.'
           : 'This image’s context changed since you reviewed it. Open Crack Again to check it, '
             + 'then try again.', code)
       }
+      if (response.status === 503 && method === 'POST') {
+        const body = await response.json().catch(() => null)
+        if ((body?.code ?? body?.data?.code) === 'paid_calls_disabled') {
+          // Not retried: the local API refuses on purpose until paid AI calls are allowed.
+          throw new CaptionJobRequestError(400, 'Caption generation is turned off on the local '
+            + 'caption API (LOCAL_ALLOW_PAID_LLM_CALLS is not true).', 'paid_calls_disabled')
+        }
+        throw new CaptionJobRequestError(503, 'Unable to start captions (503).')
+      }
       if (!response.ok) {
-        await response.body?.cancel()
+        // A refusal's code (e.g. image_not_local) tells the page not to ask again.
+        let code: string | undefined
+        if (response.status >= 400 && response.status < 500 && response.status !== 401) {
+          const body = await response.json().catch(() => null)
+          const value = body?.code ?? body?.data?.code
+          code = typeof value === 'string' ? value : undefined
+        } else {
+          await response.body?.cancel()
+        }
         throw new CaptionJobRequestError(response.status,
           response.status === 401 ? 'Please sign in again to generate captions.'
-            : `Unable to ${method === 'POST' ? 'start' : 'check'} captions (${response.status}).`)
+            : `Unable to ${method === 'POST' ? 'start' : 'check'} captions (${response.status}).`,
+          code)
       }
       return response.json()
     })

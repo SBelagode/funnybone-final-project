@@ -16,6 +16,7 @@ interface GeneratePresignedUrlResponse {
 
 interface UploadImageResponse {
   imageId: string
+  imageUrl?: string
 }
 
 type AuthContext = {
@@ -140,11 +141,13 @@ export async function generatePresignedUrl(
   }, undefined, signal)
 }
 
-export async function uploadImageFromUrl(
+// Registers an image with the caption API and returns its stored URL. Show that URL, not the
+// upload target: the local API deletes the one-time upload object once the image is stored.
+export async function registerImageFromUrl(
   imageUrl: string,
   isCommonUse: boolean = false,
   signal?: AbortSignal
-): Promise<string> {
+): Promise<{ imageId: string; imageUrl: string }> {
   const { accessToken, userId } = await getAuthContext(
     signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)
   )
@@ -167,7 +170,18 @@ export async function uploadImageFromUrl(
     throw new Error('imageId not returned from upload-image-from-url')
   }
 
-  return response.imageId
+  return {
+    imageId: response.imageId,
+    imageUrl: typeof response.imageUrl === 'string' && response.imageUrl ? response.imageUrl : imageUrl,
+  }
+}
+
+export async function uploadImageFromUrl(
+  imageUrl: string,
+  isCommonUse: boolean = false,
+  signal?: AbortSignal
+): Promise<string> {
+  return (await registerImageFromUrl(imageUrl, isCommonUse, signal)).imageId
 }
 
 export async function generateCaptions(

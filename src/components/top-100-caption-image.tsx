@@ -1,3 +1,5 @@
+import { displayImageUrl } from '@/utils/display-image-url'
+
 type Top100CaptionImageProps = {
   src: string;
   srcSet?: string;
@@ -17,7 +19,7 @@ export function Top100CaptionImage({
       className="relative h-full w-full overflow-hidden bg-gray-200 dark:bg-neutral-900"
     >
       <img
-        src={src}
+        src={displayImageUrl(src)}
         srcSet={srcSet}
         sizes={RESPONSIVE_SIZES}
         alt=""
@@ -32,7 +34,7 @@ export function Top100CaptionImage({
         aria-hidden="true"
       />
       <img
-        src={src}
+        src={displayImageUrl(src)}
         srcSet={srcSet}
         sizes={RESPONSIVE_SIZES}
         alt={`Caption Image ${captionId}`}

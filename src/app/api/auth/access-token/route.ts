@@ -1,66 +1,29 @@
 import { NextResponse } from 'next/server'
 
+import { verifiedAccessToken } from '@/utils/access-token'
 import { createClient } from '@/utils/supabase/server'
 
-type TokenPayload = {
-  role?: string
-  'https://hasura.io/jwt/claims'?: {
-    'x-hasura-role'?: string
-    [key: string]: unknown
-  }
-  [key: string]: unknown
-}
-
-function decodeJwtPayload(token: string): TokenPayload | null {
-  const [, payload] = token.split('.')
-  if (!payload) return null
-  try {
-    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
-    const decoded = Buffer.from(padded, 'base64').toString('utf-8')
-    return JSON.parse(decoded) as TokenPayload
-  } catch {
-    return null
-  }
-}
-
+// Gives the browser its own access token for calling the caption API. Who the user is comes
+// from supabase.auth.getUser() (checked with Supabase Auth); the cookie session is used only for
+// the token, which must belong to that verified, non-anonymous user.
 export async function GET() {
   const supabase = await createClient()
+  const result = await verifiedAccessToken(supabase)
 
-  const {
-    data: { session },
-    error,
-  } = await supabase.auth.getSession()
-
-  if (error) {
-    console.error('Error fetching Supabase session:', error)
-    return NextResponse.json({ error: 'Failed to fetch session' }, { status: 500 })
+  if (!result.ok) {
+    const status = result.reason === 'anonymous' || result.reason === 'mismatch' ? 403 : 401
+    const error = result.reason === 'anonymous' ? 'Anonymous users not allowed'
+      : result.reason === 'mismatch' ? 'Session does not match the signed-in user'
+        : 'Not authenticated'
+    return NextResponse.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } })
   }
 
-  if (!session) {
-    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
-  }
-
-  const user = session.user
-  const isAnonymous = user?.is_anonymous || user?.app_metadata?.provider === 'anonymous'
-  const payload = decodeJwtPayload(session.access_token)
-  const hasuraClaims = payload?.['https://hasura.io/jwt/claims']
-  const role = payload?.role ?? hasuraClaims?.['x-hasura-role']
-
-  if (session.access_token === process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+  if (result.accessToken === process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
     return NextResponse.json({ error: 'Anon key not allowed' }, { status: 403 })
   }
 
-  if (role === 'anon') {
-    return NextResponse.json({ error: 'Anonymous role not allowed' }, { status: 403 })
-  }
-
-  if (isAnonymous) {
-    return NextResponse.json({ error: 'Anonymous users not allowed' }, { status: 403 })
-  }
-
-  return NextResponse.json({
-    accessToken: session.access_token,
-    userId: user.id,
-  })
+  return NextResponse.json(
+    { accessToken: result.accessToken, userId: result.userId },
+    { headers: { 'Cache-Control': 'no-store' } },
+  )
 }

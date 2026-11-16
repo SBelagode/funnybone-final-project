@@ -89,3 +89,37 @@ The mock (`scripts/mock-caption-api.mjs`) implements the contract below, and the
 - `MOCK_CAPTION_FAIL_SUBMITS=3` refuses the next three submissions with `503`. The browser retries a submission three times, so this makes one click fail and the following **Retry** succeed.
 
 The mock still captions only images it created for the signed-in user in the current run, refuses shared and other users' images, and never posts captions.
+
+## Running against the real pipeline locally
+
+`../nonchalant-local` is a sanitized, local-only copy of Nonchalant: an in-process worker, a private
+Supabase Storage bucket and your own development project and provider keys. It snapshots the context
+into every job, refuses a second active job per image, and keeps context-dependent steps out of the
+shared image caches. It advertises this through `GET /pipeline/image-generation-state/<id>`, so
+contextual Crack Again works with it just as with the mock. The unmodified course API still gets
+**Keep existing context** only. See `../nonchalant-local/README.md`.
+
+Point Funnybone at it with `NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:4020` in `.env.local`.
+Nonchalant nests error codes under `data.code`; the job client reads both that and the mock's
+top-level `code`. A local API with paid calls disabled answers `503 paid_calls_disabled`, which is
+shown and not retried.
+
+## Banger pages when generation is unavailable
+
+`/image/<id>/captions` always shows every caption the signed-in user can see. It only asks the
+caption API for more when fewer than 10 are visible and generation can work
+(`src/utils/caption-generation-availability.ts`):
+
+- Without `NEXT_PUBLIC_API_BASE_URL` (the Vercel deployment) it never asks. Bangers show their saved
+  captions silently, and a banger or private image with none shows "No captions for this image yet".
+- If the backend refuses shared images (the local Nonchalant API only captions images in its own
+  storage), it is asked once; every other banger in that tab session then shows saved captions
+  without a request.
+- An unreachable, erroring or rate-limited backend, or one with paid calls turned off, is paused for
+  five minutes for every image. An image the backend refuses is not requested again this session.
+  An image whose job failed is not retried automatically, but **Try again** retries it.
+- Sign-in problems and "already being generated" are explained but do not block later attempts.
+
+Failures never replace or clear captions: the page shows a short note under the carousel instead
+of an error. Crack Again pages through the remaining saved captions first. The state is kept in
+session storage per API URL, with an in-memory fallback.

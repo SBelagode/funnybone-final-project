@@ -13,6 +13,8 @@ export const contextRefinement = loadModule('utils/context-refinement.ts',
 
 export const imageId = randomUUID()
 export const cdnUrl = 'https://example.test/uploads/photo.png'
+// What the caption API stores and returns; the upload target above is deleted after use.
+export const storedUrl = `http://127.0.0.1:4020/local-images/content/${'a'.repeat(64)}`
 export const photo = (name = 'photo.png', type = 'image/png') => ({ name, type })
 
 export function deferred() {
@@ -101,10 +103,10 @@ export function renderGenerateRoasts({
           log.push('presign')
           return { presignedUrl: 'https://example.test/put', cdnUrl }
         },
-        uploadImageFromUrl: async url => {
+        registerImageFromUrl: async url => {
           log.push(`register:${url}`)
           await hold.register
-          return imageId
+          return { imageId, imageUrl: storedUrl }
         },
         generateCaptions: async (id, options = {}) => {
           log.push(`generate:${id}`)

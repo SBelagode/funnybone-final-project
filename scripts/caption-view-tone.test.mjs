@@ -43,6 +43,10 @@ function render(path, exportName, props, seeded = {}) {
       useCaptionGeneration: () => ({ isLoading: false, progress: null }),
     },
     '@/components/ui/caption-view-v2': { CaptionViewV2 },
+    '@/utils/caption-generation-availability': {
+      captionGenerationAvailability: { check: () => ({ ok: false, reason: 'not-configured' }) },
+      GENERATION_BLOCK_MESSAGES: {},
+    },
     '@/components/context-refinement': {
       useContextRefinement: () => ({ panel: null, open() {}, reset() {} }),
     },

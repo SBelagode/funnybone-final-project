@@ -1,5 +1,6 @@
 "use client";
 
+import { displayImageUrl } from '@/utils/display-image-url'
 import { useEffect, useState, useRef } from "react";
 import { fetchPopularCaptionsAction } from "@/app/actions/captions/fetch-popular-captions-action";
 import {
@@ -547,7 +548,7 @@ export default function PopularCaptionsPage() {
                   {/* Main Image */}
                   <div className="w-full flex-1 min-h-[320px] px-3 pb-3">
                     <Top100CaptionImage
-                      src={displayUrl}
+                      src={displayImageUrl(displayUrl)}
                       srcSet={srcSet}
                       captionId={caption.id}
                     />

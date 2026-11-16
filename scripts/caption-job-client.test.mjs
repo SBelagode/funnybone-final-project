@@ -335,3 +335,45 @@ test('an invalid snapshot is refused before any request', async () => {
   }
   assert.equal(f.calls.length, 0)
 })
+
+test('a 409 code nested under data (Nonchalant format) is understood', async () => {
+  const f = fixture({
+    fetchImpl: async (url, init) => {
+      f.calls.push({ url, ...init })
+      return Response.json({ statusCode: 409, message: 'busy',
+        data: { code: 'generation_in_progress' } }, { status: 409 })
+    },
+  })
+  const error = await runCaptionJob(f.imageId, f.options).catch(failure => failure)
+  assert.equal(error.code, 'generation_in_progress')
+  assert.match(error.message, /already being generated/)
+})
+
+test('a local API with paid calls turned off explains itself and is not retried', async () => {
+  const f = fixture({
+    fetchImpl: async (url, init) => {
+      f.calls.push({ url, ...init })
+      return Response.json({ statusCode: 503, data: { code: 'paid_calls_disabled' } },
+        { status: 503 })
+    },
+  })
+  const error = await runCaptionJob(f.imageId, f.options).catch(failure => failure)
+  assert.equal(error.code, 'paid_calls_disabled')
+  assert.match(error.message, /LOCAL_ALLOW_PAID_LLM_CALLS/)
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.saved.size, 0, 'the pending request is cleared')
+})
+
+test('other 503 responses are still retried', async () => {
+  let posts = 0
+  const f = fixture({
+    fetchImpl: async (url, init) => {
+      f.calls.push({ url, ...init })
+      if (init.method === 'POST' && ++posts === 1) return new Response('{}', { status: 503 })
+      if (init.method === 'POST') return Response.json({ jobId: f.jobId }, { status: 202 })
+      return Response.json(f.job('completed'))
+    },
+  })
+  await runCaptionJob(f.imageId, f.options)
+  assert.equal(posts, 2)
+})

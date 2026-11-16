@@ -1,5 +1,6 @@
 'use client'
 
+import { displayImageUrl } from '@/utils/display-image-url'
 import ShareModal from '@/components/share-modal'
 import { BookmarkButton } from '@/components/ui/bookmark-button'
 import { FaArrowLeft, FaArrowRight } from 'react-icons/fa6'
@@ -168,7 +169,7 @@ export function CaptionViewV2({
           <div className="flex-1 flex items-center justify-center max-w-full">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={imageUrl}
+            src={displayImageUrl(imageUrl)}
             alt="Caption image"
               className={imageClasses}
           />

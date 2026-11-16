@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   generateCaptions,
   generatePresignedUrl,
-  uploadImageFromUrl,
+  registerImageFromUrl,
   fetchPopularCaptionsByImageIdAction,
 } from '@/app/actions/captions'
 import {
@@ -361,19 +361,20 @@ export function GenerateRoasts({
     operation: ReturnType<typeof generation.begin>,
   ) => {
     try {
-      let uploadedImageId: string
-      let uploadedImageUrl: string
+      let sourceUrl: string
       if (image.kind === 'file') {
         const contentType = `image/${image.file.type.split('/')[1]}`
         const { presignedUrl, cdnUrl } = await generatePresignedUrl(contentType, operation.signal)
         await uploadImageViaSignedUrl(image.file, presignedUrl, operation.signal)
         operation.signal.throwIfAborted()
-        uploadedImageId = await uploadImageFromUrl(cdnUrl, false, operation.signal)
-        uploadedImageUrl = cdnUrl
+        sourceUrl = cdnUrl
       } else {
-        uploadedImageId = await uploadImageFromUrl(image.url, false, operation.signal)
-        uploadedImageUrl = image.url
+        sourceUrl = image.url
       }
+      // The stored image's URL, not the upload target, which the local API deletes after use.
+      const registered = await registerImageFromUrl(sourceUrl, false, operation.signal)
+      const uploadedImageId = registered.imageId
+      const uploadedImageUrl = registered.imageUrl
       operation.signal.throwIfAborted()
       const captions = await generateAfterSavingNudge({
         imageId: uploadedImageId,

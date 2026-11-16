@@ -7,6 +7,7 @@ export {
   uploadImageAndGenerateCaptions,
   generateCaptions,
   uploadImageFromUrl,
+  registerImageFromUrl,
   generatePresignedUrl,
 } from './generate-captions-action'
 export { fetchPopularCaptionsByImageIdAction } from './fetch-popular-captions-by-image-id-action'
