@@ -43,6 +43,9 @@ function render(path, exportName, props, seeded = {}) {
       useCaptionGeneration: () => ({ isLoading: false, progress: null }),
     },
     '@/components/ui/caption-view-v2': { CaptionViewV2 },
+    '@/components/context-refinement': {
+      useContextRefinement: () => ({ panel: null, open() {}, reset() {} }),
+    },
     '@/utils/image-nudge': imageNudge,
   }
   const stub = new Proxy({}, { get: () => () => null })

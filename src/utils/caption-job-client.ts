@@ -9,7 +9,12 @@ export type CaptionJobUpdate = {
     completedSteps: number; totalSteps: number }
   captionIds: string[]
 }
+// One intentional regeneration with its own context. The request ID is the idempotency key, so
+// retrying the same request resumes it, and a new request never resumes an older one. Only APIs
+// that run jobs from this context may receive it (see src/utils/caption-api-state.ts).
+export type CaptionContextSnapshot = { requestId: string; additionalContext: string | null }
 export type CaptionGenerationOptions = {
+  contextSnapshot?: CaptionContextSnapshot
   signal?: AbortSignal
   onProgress?: (job: CaptionJobUpdate) => void
   onPartialFailure?: () => void
@@ -30,9 +35,11 @@ type ClientOptions<T> = CaptionGenerationOptions & {
 
 export class CaptionJobRequestError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  code?: string
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
 
@@ -55,6 +62,11 @@ function waitForPoll(ms: number, signal: AbortSignal): Promise<void> {
 
 export async function runCaptionJob<T>(imageId: string, options: ClientOptions<T>): Promise<T[]> {
   if (!uuid(imageId)) throw new Error('Invalid image ID.')
+  const snapshot = options.contextSnapshot
+  if (snapshot && (!uuid(snapshot.requestId)
+    || (snapshot.additionalContext !== null && typeof snapshot.additionalContext !== 'string'))) {
+    throw new Error('Invalid caption request.')
+  }
   const { getAuth, loadCaptions, onProgress, onPartialFailure } = options
   const fetchImpl = options.fetchImpl ?? fetch
   const wait = options.wait ?? waitForPoll
@@ -65,19 +77,23 @@ export async function runCaptionJob<T>(imageId: string, options: ClientOptions<T
   let auth = await getAuth(requestSignal())
   signal.throwIfAborted()
   const ownerId = auth.userId
+  // The context itself is never stored here, only the request ID and job ID.
   const key = `caption-job:${apiUrl}:${ownerId}:${imageId}`
+    + (snapshot ? `:request:${snapshot.requestId}` : '')
   let storage = options.storage
   try { storage ??= typeof window === 'undefined' ? undefined : window.sessionStorage } catch {}
   let restored = pendingMemory.get(key)
   if (!restored) {
     try {
       const saved = JSON.parse(storage?.getItem(key) ?? 'null') as PendingJob | null
-      if (saved && uuid(saved.idempotencyKey) && (!saved.jobId || uuid(saved.jobId))) {
+      if (saved && uuid(saved.idempotencyKey) && (!saved.jobId || uuid(saved.jobId))
+        && (!snapshot || saved.idempotencyKey === snapshot.requestId)) {
         restored = saved
       }
     } catch { /* Storage is optional; the in-memory copy also supports retries. */ }
   }
-  const pending: PendingJob = restored ?? { idempotencyKey: crypto.randomUUID() }
+  const pending: PendingJob = restored
+    ?? { idempotencyKey: snapshot?.requestId ?? crypto.randomUUID() }
   const save = () => {
     pendingMemory.set(key, pending)
     try { storage?.setItem(key, JSON.stringify(pending)) } catch {}
@@ -109,8 +125,19 @@ export async function runCaptionJob<T>(imageId: string, options: ClientOptions<T
             'Content-Type': 'application/json', 'Idempotency-Key': pending.idempotencyKey,
           } : {}),
         },
-        ...(method === 'POST' ? { body: JSON.stringify({ imageId }) } : {}),
+        ...(method === 'POST' ? {
+          body: JSON.stringify(snapshot
+            ? { imageId, additionalContext: snapshot.additionalContext } : { imageId }),
+        } : {}),
       })
+      if (response.status === 409) {
+        const code = String((await response.json().catch(() => null))?.code ?? 'conflict')
+        throw new CaptionJobRequestError(409, code === 'generation_in_progress'
+          ? 'Captions are already being generated for this image. Wait for them to finish, '
+            + 'then try again.'
+          : 'This image’s context changed since you reviewed it. Open Crack Again to check it, '
+            + 'then try again.', code)
+      }
       if (!response.ok) {
         await response.body?.cancel()
         throw new CaptionJobRequestError(response.status,

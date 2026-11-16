@@ -236,3 +236,102 @@ test('a changed user never reuses another account’s job', async () => {
   assert.equal(submits.length, 2)
   assert.notEqual(submits[0].headers['Idempotency-Key'], submits[1].headers['Idempotency-Key'])
 })
+
+// ---- Context snapshots (Crack Again refinement) --------------------------------------------
+
+const snapshotFor = (additionalContext = 'Exam week\nCoffee ran out') =>
+  ({ requestId: randomUUID(), additionalContext })
+
+test('a context snapshot is sent in the body and its request ID is the idempotency key',
+  async () => {
+    const f = fixture()
+    const contextSnapshot = snapshotFor()
+    await runCaptionJob(f.imageId, { ...f.options, contextSnapshot })
+    assert.deepEqual(JSON.parse(f.calls[0].body),
+      { imageId: f.imageId, additionalContext: 'Exam week\nCoffee ran out' })
+    assert.equal(f.calls[0].headers['Idempotency-Key'], contextSnapshot.requestId)
+  })
+
+test('a cleared context is sent as an explicit null', async () => {
+  const f = fixture()
+  await runCaptionJob(f.imageId, { ...f.options, contextSnapshot: snapshotFor(null) })
+  assert.deepEqual(JSON.parse(f.calls[0].body), { imageId: f.imageId, additionalContext: null })
+})
+
+test('retrying the same request resumes its job without submitting again', async () => {
+  const f = fixture()
+  const contextSnapshot = snapshotFor()
+  // The job is accepted, then a status check fails, so the request stays pending.
+  f.respond([400])
+  await assert.rejects(runCaptionJob(f.imageId, { ...f.options, contextSnapshot }))
+  assert.equal(f.calls.filter(call => call.method === 'POST').length, 1)
+  const stored = [...f.saved.values()].map(value => JSON.parse(value))
+  assert.deepEqual(stored, [{ idempotencyKey: contextSnapshot.requestId, jobId: f.jobId }])
+  assert.equal([...f.saved.values()].join().includes('Exam week'), false,
+    'the context itself is never stored')
+
+  f.respond([f.job('completed')])
+  await runCaptionJob(f.imageId, { ...f.options, contextSnapshot })
+  assert.equal(f.calls.filter(call => call.method === 'POST').length, 1, 'no second submission')
+  assert.equal(f.saved.size, 0)
+})
+
+test('a new request never resumes an older request’s job', async () => {
+  const f = fixture()
+  f.respond([400])
+  await assert.rejects(runCaptionJob(f.imageId, { ...f.options, contextSnapshot: snapshotFor() }))
+  f.respond([f.job('completed')])
+  const second = snapshotFor('Something else')
+  await runCaptionJob(f.imageId, { ...f.options, contextSnapshot: second })
+  const posts = f.calls.filter(call => call.method === 'POST')
+  assert.equal(posts.length, 2)
+  assert.equal(posts[1].headers['Idempotency-Key'], second.requestId)
+  assert.notEqual(posts[0].headers['Idempotency-Key'], posts[1].headers['Idempotency-Key'])
+})
+
+test('a request-scoped job is kept apart from the older per-image pending job', async () => {
+  const f = fixture()
+  f.respond([400])
+  await assert.rejects(runCaptionJob(f.imageId, f.options))
+  const legacyKey = [...f.saved.keys()][0]
+  f.respond([f.job('completed')])
+  await runCaptionJob(f.imageId, { ...f.options, contextSnapshot: snapshotFor() })
+  assert.equal(f.calls.filter(call => call.method === 'POST').length, 2,
+    'the old pending job is not reused for a refined context')
+  assert.ok(f.saved.has(legacyKey), 'the older pending job is left for its own retry')
+})
+
+for (const [code, pattern] of [
+  ['generation_in_progress', /already being generated/],
+  ['idempotency_conflict', /context changed/],
+  ['context_mismatch', /context changed/],
+]) {
+  test(`a 409 ${code} explains itself and clears the pending request`, async () => {
+    const f = fixture({
+      fetchImpl: async (url, init) => {
+        f.calls.push({ url, ...init })
+        return Response.json({ error: 'conflict', code }, { status: 409 })
+      },
+    })
+    const error = await runCaptionJob(f.imageId,
+      { ...f.options, contextSnapshot: snapshotFor() }).catch(failure => failure)
+    assert.ok(error instanceof CaptionJobRequestError)
+    assert.equal(error.status, 409)
+    assert.equal(error.code, code)
+    assert.match(error.message, pattern)
+    assert.equal(f.calls.length, 1, 'conflicts are not retried automatically')
+    assert.equal(f.saved.size, 0)
+  })
+}
+
+test('an invalid snapshot is refused before any request', async () => {
+  const f = fixture()
+  for (const contextSnapshot of [
+    { requestId: 'not-a-uuid', additionalContext: 'x' },
+    { requestId: randomUUID(), additionalContext: 42 },
+  ]) {
+    await assert.rejects(runCaptionJob(f.imageId, { ...f.options, contextSnapshot }),
+      /Invalid caption request/)
+  }
+  assert.equal(f.calls.length, 0)
+})

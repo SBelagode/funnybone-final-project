@@ -14,6 +14,16 @@
 // Uploaded files are kept in this process's memory only, so they can be previewed locally.
 // They are never written to disk or sent anywhere, and they disappear on restart.
 //
+// Context snapshots: a generate-captions body may include additionalContext. The job then uses
+// that copy, never a later read of the image row, so editing the context cannot change a job
+// that is already running. The snapshot must match the saved context at submission (save first,
+// then submit). One job per image may be active at a time, enforced here, not in the browser.
+// This is what the real Nonchalant API does NOT do yet: it reads the row at every step.
+//
+// Optional settings for manual testing:
+//   MOCK_CAPTION_DELAY_MS=8000    keep each job running this long before its caption appears
+//   MOCK_CAPTION_FAIL_SUBMITS=3   refuse the next N submissions with a 503, to test retrying
+//
 // Run: node --env-file=.env.local scripts/mock-caption-api.mjs
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
@@ -26,7 +36,10 @@ const maxStoredUploads = 25
 const uploadPath = '/mock-upload/'
 // SVG and HTML are excluded because this server hands stored bytes back to the browser.
 const imageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic'])
+const maxContextLength = 280
 const port = Number(process.env.MOCK_CAPTION_API_PORT ?? 4010)
+const delayMs = Number(process.env.MOCK_CAPTION_DELAY_MS ?? 0)
+let failSubmits = Number(process.env.MOCK_CAPTION_FAIL_SUBMITS ?? 0)
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
@@ -53,6 +66,12 @@ const keyType = publicKeyType(supabaseKey)
 if (!keyType) refuseToStart('NEXT_PUBLIC_SUPABASE_ANON_KEY is not a public Supabase key.')
 if (!URL.canParse(supabaseUrl)) refuseToStart('NEXT_PUBLIC_SUPABASE_URL is not a valid URL.')
 if (!Number.isInteger(port)) refuseToStart('MOCK_CAPTION_API_PORT is not a valid port.')
+if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > 600_000) {
+  refuseToStart('MOCK_CAPTION_DELAY_MS must be 0 to 600000.')
+}
+if (!Number.isInteger(failSubmits) || failSubmits < 0) {
+  refuseToStart('MOCK_CAPTION_FAIL_SUBMITS must be a whole number.')
+}
 
 const runId = randomUUID()
 const imageMarker = `#${source}=${runId}`
@@ -60,6 +79,8 @@ const createdImages = new Map()
 const uploads = new Map()
 const jobs = new Map()
 const jobsByKey = new Map()
+// user:image -> jobId, held from submission until the job is terminal.
+const activeJobs = new Map()
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key',
@@ -78,8 +99,26 @@ class HttpError extends Error {
 
 const databaseError = (action, error) =>
   new HttpError(500, `${action} failed.`, `${action} failed (code ${error.code ?? 'unknown'})`)
+const conflict = (code, message) => Object.assign(new HttpError(409, message), { code })
 const rejectedImage = reason =>
   new HttpError(403, 'The mock only captions images it created for you in this run.', reason)
+
+const normalizeContext = value => (typeof value === 'string' ? value.trim() : '') || null
+
+// Same rules as the app's server action. Only the mock's own validation runs here.
+function readSnapshot(body) {
+  if (!Object.hasOwn(body, 'additionalContext')) return { present: false }
+  const value = body.additionalContext
+  if (value !== null && typeof value !== 'string') {
+    throw new HttpError(400, 'additionalContext must be a string or null.')
+  }
+  const context = normalizeContext(value)
+  if (context && context.length > maxContextLength) {
+    throw new HttpError(400, `additionalContext must be ${maxContextLength} characters or fewer.`)
+  }
+  if (context?.includes('${')) throw new HttpError(400, 'additionalContext cannot include "${".')
+  return { present: true, context }
+}
 
 function send(response, status, body) {
   response.writeHead(status, { ...cors, 'Content-Type': 'application/json' })
@@ -189,8 +228,7 @@ async function loadMockImage({ user, db }, imageId) {
   return image
 }
 
-async function createJob(session, imageId) {
-  const { additional_context: context } = await loadMockImage(session, imageId)
+async function insertCaption(session, imageId, context) {
   const { data: caption, error } = await session.db.from('captions')
     .insert({
       image_id: imageId,
@@ -203,18 +241,88 @@ async function createJob(session, imageId) {
     .select('id')
     .single()
   if (error) throw databaseError('Caption insert', error)
+  return caption.id
+}
 
+const progress = done => ({ total: 1, completed: done, failed: 0, completedSteps: done,
+  totalSteps: 1 })
+
+async function createJob(session, imageId, snapshot, release) {
+  const image = await loadMockImage(session, imageId)
+  const saved = normalizeContext(image.additional_context)
+  // Save first, then submit: a snapshot that differs from the saved context is refused.
+  if (snapshot.present && snapshot.context !== saved) {
+    throw conflict('context_mismatch', 'The saved context changed. Review it and try again.')
+  }
+  // The job keeps this copy. Later edits to the image row never reach it.
+  const context = snapshot.present ? snapshot.context : saved
   const jobId = randomUUID()
-  jobs.set(jobId, {
-    ownerId: session.user.id,
-    job: {
-      jobId,
-      status: 'completed',
-      progress: { total: 1, completed: 1, failed: 0, completedSteps: 1, totalSteps: 1 },
-      captionIds: [caption.id],
-    },
-  })
+  const job = { jobId, status: 'running', progress: progress(0), captionIds: [] }
+  const finish = async () => {
+    try {
+      job.captionIds = [await insertCaption(session, imageId, context)]
+      job.status = 'completed'
+      job.progress = progress(1)
+    } catch (error) {
+      job.status = 'failed'
+      throw error
+    } finally {
+      release()
+    }
+  }
+  if (delayMs === 0) await finish()
+  else {
+    setTimeout(() => finish().catch(error => console.error(
+      `job ${jobId} -> failed: ${error instanceof HttpError ? error.logDetail : error.name}`)),
+    delayMs)
+  }
+  jobs.set(jobId, { ownerId: session.user.id, job })
   return jobId
+}
+
+// Reservations happen synchronously, before any await, so simultaneous requests cannot both
+// pass the checks.
+function submitJob(session, body, idempotencyKey) {
+  if (typeof idempotencyKey !== 'string' || !/^[\w-]{8,128}$/.test(idempotencyKey)) {
+    throw new HttpError(400, 'An Idempotency-Key header is required.')
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new HttpError(400, 'The request body must be a JSON object.')
+  }
+  const snapshot = readSnapshot(body)
+  const imageId = body.imageId
+  const fingerprint = JSON.stringify([imageId, snapshot.present ? snapshot.context : '<row>'])
+  const key = `${session.user.id}:${idempotencyKey}`
+  const existing = jobsByKey.get(key)
+  if (existing) {
+    if (existing.fingerprint !== fingerprint) {
+      throw conflict('idempotency_conflict',
+        'This request was already sent with a different image or context.')
+    }
+    return existing.promise
+  }
+  if (failSubmits > 0) {
+    failSubmits -= 1
+    throw new HttpError(503, 'The mock refused this submission (MOCK_CAPTION_FAIL_SUBMITS).')
+  }
+  const imageKey = `${session.user.id}:${imageId}`
+  if (activeJobs.has(imageKey)) {
+    throw conflict('generation_in_progress',
+      'Captions are already being generated for this image.')
+  }
+  const reservation = {}
+  activeJobs.set(imageKey, reservation)
+  const release = () => {
+    if (activeJobs.get(imageKey) === reservation) activeJobs.delete(imageKey)
+  }
+  const promise = createJob(session, imageId, snapshot, release)
+  const entry = { fingerprint, promise }
+  jobsByKey.set(key, entry)
+  promise.catch(() => {
+    release()
+    if (jobsByKey.get(key) === entry) jobsByKey.delete(key)
+  })
+  return promise
 }
 
 async function route(request, response, pathname) {
@@ -230,6 +338,16 @@ async function route(request, response, pathname) {
 
   const session = await authenticate(request)
 
+  // Lets the app check, server side, that this API runs jobs from context snapshots and
+  // whether a job for this image is active. Only images this run created are answered.
+  if (request.method === 'GET' && pathname.startsWith('/pipeline/image-generation-state/')) {
+    const imageId = decodeURIComponent(pathname.split('/').pop())
+    await loadMockImage(session, imageId)
+    return send(response, 200, {
+      supportsContextSnapshots: true,
+      activeJob: activeJobs.has(`${session.user.id}:${imageId}`),
+    })
+  }
   if (request.method === 'GET' && pathname.startsWith('/pipeline/caption-job/')) {
     const saved = jobs.get(pathname.split('/').pop())
     if (saved?.ownerId !== session.user.id) throw new HttpError(404, 'Job not found.')
@@ -247,9 +365,8 @@ async function route(request, response, pathname) {
     return send(response, 200, { imageId: await registerImage(session, body) })
   }
   if (pathname === '/pipeline/generate-captions') {
-    const key = `${session.user.id}:${request.headers['idempotency-key']}`
-    if (!jobsByKey.has(key)) jobsByKey.set(key, await createJob(session, body.imageId))
-    return send(response, 202, { jobId: jobsByKey.get(key) })
+    const jobId = await submitJob(session, body, request.headers['idempotency-key'])
+    return send(response, 202, { jobId })
   }
   throw new HttpError(404, 'Not found.')
 }
@@ -263,7 +380,10 @@ const server = createServer(async (request, response) => {
     const status = known ? error.status : 500
     console.error(`${request.method} ${pathname} -> ${status}: `
       + (known ? error.logDetail : `unexpected ${error.name}`))
-    send(response, status, { error: known ? error.message : 'The mock caption API failed.' })
+    send(response, status, {
+      error: known ? error.message : 'The mock caption API failed.',
+      ...(known && error.code ? { code: error.code } : {}),
+    })
   }
 })
 
@@ -272,4 +392,6 @@ server.listen(port, host, () => {
   console.log(`MOCK caption API listening on http://${host}:${server.address().port}`)
   console.log(`Supabase project: ${new URL(supabaseUrl).host} (${keyType} key)`)
   console.log(`Mock run: ${runId}. No AI. Rows it creates persist. Use made-up nudges only.`)
+  if (delayMs) console.log(`Each job stays running for ${delayMs} ms.`)
+  if (failSubmits) console.log(`The next ${failSubmits} submission(s) will be refused.`)
 })

@@ -28,7 +28,7 @@ A nudge is optional context for a new file or URL upload. It is stored in `image
 
 Saving is off unless the server-only variable `ENABLE_NUDGE_PERSISTENCE` is exactly `true`. While it is off, a typed nudge blocks the upload with a clear message, and `updateImageNudgeAction` refuses to write. Keep it off for real users until `llm_model_responses` is reviewed: the caption API logs full prompts there, and anonymous clients can read that table in the restored database.
 
-The saved nudge stays on the image, so **Crack Again** reuses it. Shared images never take a nudge. Changing the nudge on an existing image is not supported yet: the pending job key does not include the nudge, so it could resume an older job.
+The saved nudge stays on the image, so **Crack Again** reuses it. Shared images never take a nudge. On `/new`, **Crack Again** can change it through the refinement panel below. The image page and My Images keep their direct **Crack Again**, which reuses the saved context unchanged.
 
 Tests named `[mock]` stub Supabase and the caption API. `scripts/mock-caption-api.mjs` is a local stand-in for manual checks against real RLS, not the course API. It only captions images that the running process created for the signed-in user: each must be in its in-memory list, end in the run's `#mock-caption-api=<run id>` URL marker, and still be owned, unshared and unpublished. Other images get a 403, and restarting it refuses earlier mock images. Uploaded files stay in its memory only, so their previews stop working after a restart. Its captions have `metadata.source = 'mock-caption-api'` and no `profile_id`, which hides the Post button. They are not private, because the restored database has no RLS on `captions`, so use made-up nudges only.
 
@@ -38,3 +38,54 @@ On `/new`, the file picker, drag-and-drop and **Enter Link** only choose an imag
 
 Replacing or removing the image keeps the nudge. Each local preview URL is revoked when the image is replaced, removed, generated or the page unmounts. A failed generation keeps the image selected so the user can retry. A click guard set synchronously on click prevents a second generation from starting, and cancelling the first, before the button re-renders as disabled. **Continue browsing** releases the guard so another image can be generated while the first runs in the background.
 
+
+## Refining context with Crack Again (`/new` only)
+
+On the `/new` results, **Crack Again** opens a panel instead of generating immediately. It loads the image's saved context with `getImageContextAction`, then offers:
+
+- **Keep existing context**: generate again with no change.
+- **Add more context**: the saved context, a newline, then the addition.
+- **Replace context**: new text in place of the saved context. Blank text is refused; use Clear.
+- **Clear context**: an explicit write of `null`. This is different from leaving the first nudge blank, which writes nothing.
+
+The panel shows the saved context, the exact context for this generation and its length out of 280. The limit and the `${` ban apply to that combined text, both in the panel and again on the server. **Cancel** only discards the panel; nothing is written until the user submits. The submit button is disabled while the context loads, while saving, while any generation runs and while the caption API reports an active job for the image. A click guard set synchronously stops rapid clicks. New captions are added before the earlier ones, which are never removed. A failed save or generation leaves them on screen.
+
+### Server side
+
+`updateImageContextAction(imageId, { mode, text, expected })` in `src/app/actions/images/image-context-action.ts` uses the signed-in user's JWT, never a service-role key. It:
+
+1. Requires `ENABLE_NUDGE_PERSISTENCE=true` and a signed-in, non-anonymous user.
+2. Reads the row filtered by `id`, `profile_id = user` and `is_common_use IS NOT TRUE`, so bangers, imported shared images and other users' images are never read or changed.
+3. Refuses with a conflict if the saved context no longer matches what the panel showed (`expected`), and returns the current value so the panel refreshes.
+4. Recomputes the combined context from the database value and validates it.
+5. Asks the caption API (`GET /pipeline/image-generation-state/<imageId>`, with the user's JWT) whether it runs jobs from a context snapshot and whether a job for this image is active. If the API lacks the route, is unreachable or reports an active job, nothing is written.
+6. Writes with a compare-and-set (`additional_context` must still equal the value read in step 2). Zero updated rows is reported as a conflict. Keep, and a replace with identical text, write nothing.
+
+It returns the exact saved context. The browser then submits `{ imageId, additionalContext }` with a new request ID, which is also the `Idempotency-Key`. The pending-job reference is stored per request, so retrying the same request resumes its job, and a new refinement never resumes an older one. The context text itself is not stored in session storage. If the save succeeds but submission fails, the panel shows the newly saved context, switches to Keep and offers **Retry**, which reuses the same request ID and context and does not save again. Changing the choice discards that retry and starts a new request. A `409` from the API (`generation_in_progress`, `idempotency_conflict` or `context_mismatch`) is shown as a clear message and is not retried automatically.
+
+### With the unmodified Nonchalant API, refinement stays off
+
+Nonchalant has no `image-generation-state` route, so the panel only offers **Keep existing context** and explains why, and the server action refuses every change. Keep then submits `{ imageId }` exactly as before. The reasons:
+
+- Nonchalant reads `images.additional_context` at every pipeline step (`make-pipeline-step-request.ts`), so a change during a job would reach that job's later steps.
+- Its request normalizer drops unknown fields, so an `additionalContext` in the body is ignored.
+- It does not refuse a second job for an image that already has one running.
+- It caches `celebrity_recognition` and `image_description` on the image row. Flavor 101's first step uses the cached celebrity result, so a refined context cannot change that step after the first run.
+
+The mock (`scripts/mock-caption-api.mjs`) implements the contract below, and the tests run against it. Passing mock tests do not mean the real backend has been fixed.
+
+### Nonchalant changes required before enabling it (not implemented)
+
+1. **Immutable context snapshots.** Accept an optional `additionalContext: string | null` in the generate-captions body, validated server-side (trimmed, 280 characters or fewer, no `${`). Include it in the normalized request so the existing idempotency check returns `409` when the same key arrives with a different context. Store it on the job when it is created, and have every step use the job's copy instead of re-reading the image row. Requests without the field keep today's behavior.
+2. **Save first, then submit.** Refuse with `409 context_mismatch` when the snapshot differs from the saved `images.additional_context` at submission, so the context shown in the app is always the one used.
+3. **One active job per user and image, enforced atomically (option 3b, preferred).** Inside `submit_caption_generation_job`, take a transaction-scoped advisory lock on the image ID, or add a partial unique index on active jobs, and return `409 generation_in_progress` when one exists. This is a database migration and needs review before it is applied. A check in application code alone would leave a race.
+4. **Context-dependent caching.** Do not reuse the cached `celebrity_recognition` or `image_description` for steps whose prompts use `${imageAdditionalContext}`, or key the cache by a hash of the snapshot.
+5. **Capability route.** Add `GET /pipeline/image-generation-state/<imageId>`, authenticated with the user's JWT and limited to that user's own unshared images, returning `{ "supportsContextSnapshots": true, "activeJob": <boolean> }`. Funnybone enables refinement only when this route answers. Ship it last, after 1 to 4.
+6. **RLS review.** The job functions are executable by anon and authenticated in the restored dump, but the migration meant them to be service-role only. Review this before relying on them.
+
+### Mock settings for manual testing
+
+- `MOCK_CAPTION_DELAY_MS=8000` keeps each job running for 8 seconds, so the active-job checks can be seen.
+- `MOCK_CAPTION_FAIL_SUBMITS=3` refuses the next three submissions with `503`. The browser retries a submission three times, so this makes one click fail and the following **Retry** succeed.
+
+The mock still captions only images it created for the signed-in user in the current run, refuses shared and other users' images, and never posts captions.

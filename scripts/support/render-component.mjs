@@ -9,12 +9,52 @@ const require = createRequire(import.meta.url)
 const sameDeps = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length
   && a.every((value, index) => Object.is(value, b[index]))
 
-export function mount(path, exportName, props, mocks = {}) {
+// Elements stay as { type, props }; function components are not called, so tests read their props.
+export const jsxRuntime = {
+  Fragment: 'fragment',
+  jsx: (type, props) => ({ type, props }),
+  jsxs: (type, props) => ({ type, props }),
+}
+
+function transpile(path) {
   const source = readFileSync(new URL(`../../src/${path}`, import.meta.url), 'utf8')
-  const { outputText } = ts.transpileModule(source, {
+  return ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS,
       jsx: ts.JsxEmit.ReactJSX },
-  })
+  }).outputText
+}
+
+const stub = new Proxy({}, { get: () => () => null })
+
+// Loads a real src module with the given imports, e.g. a hook that must share a mounted
+// component's React runtime. Unlisted @/ imports become stubs.
+export function loadModule(path, mocks = {}) {
+  const all = { 'react/jsx-runtime': jsxRuntime, ...mocks }
+  const exports = {}
+  new Function('require', 'exports', transpile(path))(name => {
+    if (name in all) return all[name]
+    return name.startsWith('@/') ? stub : require(name)
+  }, exports)
+  return exports
+}
+
+// Depth-first list of every element in a tree.
+export function walk(tree) {
+  const found = []
+  const pending = [tree]
+  while (pending.length) {
+    const node = pending.shift()
+    if (Array.isArray(node)) pending.unshift(...node)
+    else if (node?.props) {
+      found.push(node)
+      pending.unshift(node.props.children)
+    }
+  }
+  return found
+}
+
+export function mount(path, exportName, props, mocks = {}) {
+  const outputText = transpile(path)
 
   const hooks = []
   let index = 0
@@ -62,13 +102,11 @@ export function mount(path, exportName, props, mocks = {}) {
       })
     },
   }
-  const element = (type, elementProps) => ({ type, props: elementProps })
   const all = {
     react,
-    'react/jsx-runtime': { Fragment: 'fragment', jsx: element, jsxs: element },
+    'react/jsx-runtime': jsxRuntime,
     ...(typeof mocks === 'function' ? mocks(react) : mocks),
   }
-  const stub = new Proxy({}, { get: () => () => null })
   const exports = {}
   new Function('require', 'exports', outputText)(name => {
     if (name in all) return all[name]
@@ -92,19 +130,7 @@ export function mount(path, exportName, props, mocks = {}) {
   }
   render()
 
-  const nodes = () => {
-    const found = []
-    const pending = [tree]
-    while (pending.length) {
-      const node = pending.shift()
-      if (Array.isArray(node)) pending.unshift(...node)
-      else if (node?.props) {
-        found.push(node)
-        pending.unshift(node.props.children)
-      }
-    }
-    return found
-  }
+  const nodes = () => walk(tree)
   return {
     get tree() { return tree },
     findAll: matches => nodes().filter(matches),

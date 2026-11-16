@@ -5,3 +5,4 @@ export {
   getNudgeAvailabilityAction,
   updateImageNudgeAction,
 } from './update-image-nudge-action'
+export { getImageContextAction, updateImageContextAction } from './image-context-action'

@@ -1,10 +1,15 @@
 // Mock fixture for the real GenerateRoasts component. Server actions, the caption API, toasts and
-// navigation are stubbed; nudge validation, the save-then-generate flow and file checks are real.
+// navigation are stubbed; nudge validation, the save-then-generate flow, file checks and the
+// Crack Again refinement hook are real. `server` stands in for the image row and the API state.
 import { randomUUID } from 'node:crypto'
-import { mount, textOf } from './render-component.mjs'
+import { loadModule, mount, textOf } from './render-component.mjs'
 import * as imageNudge from '../../src/utils/image-nudge.ts'
 import * as uploadFlow from '../../src/utils/nudge-upload-flow.ts'
 import * as validExtension from '../../src/utils/valid-extension.ts'
+
+// Loaded through the transpiler because it imports with the @/ alias.
+export const contextRefinement = loadModule('utils/context-refinement.ts',
+  { '@/utils/image-nudge': imageNudge })
 
 export const imageId = randomUUID()
 export const cdnUrl = 'https://example.test/uploads/photo.png'
@@ -18,8 +23,14 @@ export function deferred() {
 
 const component = name => Object.defineProperty(() => null, 'name', { value: name })
 
-export function renderGenerateRoasts({ available = true, save, bangers = [], hold = {} } = {}) {
+export function renderGenerateRoasts({
+  available = true, save, bangers = [], hold = {}, generate, contextInfo, saveContext,
+  refinement = true,
+} = {}) {
   const log = []
+  // The simulated image row and caption API. Tests may change these between steps.
+  const server = { context: null, refinement, activeJob: false, writes: [] }
+  const generations = []
   const toasts = []
   const routes = []
   const begun = []
@@ -37,9 +48,17 @@ export function renderGenerateRoasts({ available = true, save, bangers = [], hol
     CaptionViewV2: component('CaptionViewV2'),
   }
   let active = null
+  let refinementModule
+  // The refinement hook must share the component's React runtime and the same mocked actions.
+  const withRefinement = (react, mocks) => {
+    refinementModule = loadModule('components/context-refinement.tsx', {
+      react, '@/utils/context-refinement': contextRefinement, ...mocks,
+    })
+    return { ...mocks, '@/components/context-refinement': refinementModule }
+  }
 
   const view = mount('components/generate-roasts.tsx', 'GenerateRoasts',
-    { redirectOnSelect: true }, react => ({
+    { redirectOnSelect: true }, react => withRefinement(react, {
       'next/navigation': { useRouter: () => router },
       '@/hooks/use-toast': { useToast: () => ({ toast }) },
       '@/hooks/useCaptionGeneration': {
@@ -87,9 +106,13 @@ export function renderGenerateRoasts({ available = true, save, bangers = [], hol
           await hold.register
           return imageId
         },
-        generateCaptions: async id => {
+        generateCaptions: async (id, options = {}) => {
           log.push(`generate:${id}`)
-          return [caption]
+          generations.push({ id, snapshot: options.contextSnapshot })
+          await hold.generate
+          if (generate) return generate(generations.length, options)
+          if (generations.length === 1) return [caption]
+          return [{ ...caption, id: randomUUID(), content: `Mock caption ${generations.length}` }]
         },
       },
       '@/app/actions/images': {
@@ -104,7 +127,35 @@ export function renderGenerateRoasts({ available = true, save, bangers = [], hol
         },
         updateImageNudgeAction: async (id, text) => {
           log.push(`save:${text}`)
-          return save ? save() : { ok: true }
+          const result = save ? save() : { ok: true }
+          if (result.ok) server.context = text
+          return result
+        },
+        getImageContextAction: async () => {
+          log.push('context-info')
+          await hold.contextInfo
+          if (contextInfo) return contextInfo()
+          return { ok: true, context: server.context, refinement: server.refinement,
+            activeJob: server.activeJob, notice: server.refinement ? null : 'Keep only.' }
+        },
+        // Mirrors the server action's rules with the real combineContext.
+        updateImageContextAction: async (id, request) => {
+          log.push(`context-save:${request.mode}`)
+          await hold.saveContext
+          if (saveContext) return saveContext(request)
+          if (request.expected !== server.context) {
+            return { ok: false, code: 'conflict', error: 'Changed elsewhere.',
+              current: server.context }
+          }
+          if (server.activeJob) return { ok: false, code: 'busy', error: 'Still running.' }
+          const result = contextRefinement.combineContext(server.context, request.mode,
+            request.text)
+          if (!result.ok) return { ok: false, code: 'invalid', error: result.error }
+          if (result.context !== server.context) {
+            server.writes.push(result.context)
+            server.context = result.context
+          }
+          return { ok: true, context: result.context }
         },
       },
       '@/app/actions/auth/check-auth-status': {
@@ -129,10 +180,26 @@ export function renderGenerateRoasts({ available = true, save, bangers = [], hol
   const generateButton = () => view.find(node => node.type === ui.Button
     && /Generate Captions|Starting…/.test(textOf(node)))
 
+  const panel = () => view.query(node => node.type === refinementModule.ContextRefinementPanel)
   return {
     ...view,
     ui,
     log,
+    server,
+    generations,
+    panel,
+    panelProps: () => panel()?.props ?? null,
+    PanelComponent: () => refinementModule.ContextRefinementPanel,
+    async crackAgain() {
+      view.find(node => node.type === 'button' && textOf(node).includes('Crack Again'))
+        .props.onClick()
+      await view.settle()
+    },
+    shownCaptions: () => {
+      const result = view.query(node => node.type === ui.CaptionViewV2)
+      return result ? { content: result.props.content, index: result.props.currentIndex,
+        total: result.props.totalCount } : null
+    },
     toasts,
     routes,
     begun,

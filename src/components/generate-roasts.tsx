@@ -44,7 +44,7 @@ import {
 } from '@/utils/types'
 import { uploadImageViaSignedUrl } from '@/utils/upload-image-signed-url'
 import { toggleCaptionSave } from '@/utils/toggle-caption-save'
-import { roastAgain as roastAgainUtil } from '@/utils/roast-again'
+import { ContextRefinementPanel, useContextRefinement } from '@/components/context-refinement'
 import { hasValidImageExtension, validExtensions } from '@/utils/valid-extension'
 import { MAX_NUDGE_LENGTH, type NudgeValidation, validateNudge } from '@/utils/image-nudge'
 import { generateAfterSavingNudge, prepareNudgeForUpload } from '@/utils/nudge-upload-flow'
@@ -108,6 +108,18 @@ export function GenerateRoasts({
   const notifyPartialFailure = () => toast({
     title: 'Some captions are ready',
     description: 'Some humor flavors could not finish. Showing the captions that succeeded.',
+  })
+  // Crack Again on /new opens this panel. Other pages keep their direct Crack Again.
+  const refinement = useContextRefinement({
+    imageId,
+    imagePreview,
+    generation,
+    toast,
+    // Earlier captions stay; the new ones come first.
+    onCaptions: captions => {
+      setRoasts(previous => [...captions, ...previous])
+      setCurrentCaptionIndex(0)
+    },
   })
   const nudgeValidation = validateNudge(nudge)
   const nudgeError = nudgeValidation.ok ? null : nudgeValidation.error
@@ -431,6 +443,7 @@ export function GenerateRoasts({
     setCurrentCaptionIndex(0)
     setSelectedImage(null)
     setPreviewFailed(false)
+    refinement.reset()
   }
 
   const handleContinueBrowsing = () => {
@@ -1039,17 +1052,9 @@ export function GenerateRoasts({
                 w-full max-w-[650px] mx-auto flex-wrap"
             >
               <button
-                onClick={() =>
-                  roastAgainUtil({
-                    toast,
-                    generation,
-                    kind: 'start',
-                    imagePreview,
-                    resetUploader,
-                    imageId,
-                    setRoasts,
-                  })
-                }
+                type="button"
+                onClick={refinement.open}
+                aria-expanded={Boolean(refinement.panel)}
                 className="bg-primary/20 text-primary px-5 py-2.5 sm:px-6 sm:py-3 rounded-xl 
                 font-semibold hover:bg-primary/30 transition-colors duration-200 
                 flex items-center gap-1.5 sm:gap-2 border border-primary text-sm sm:text-base 
@@ -1095,6 +1100,7 @@ export function GenerateRoasts({
                 <span>Crack New Image</span>
               </button>
             </div>
+            {refinement.panel && <ContextRefinementPanel {...refinement.panel} />}
           </div>
         )}
         <UrlInputModal

@@ -95,21 +95,22 @@ let mock
 let fakeUrl
 let runId
 
-const call = (path, { method = 'POST', body, token = userA.token, key } = {}) =>
-  fetch(`${mock.base}${path}`, {
+const call = (path, { method = 'POST', body, token = userA.token, key, base = mock.base } = {}) =>
+  fetch(`${base}${path}`, {
     method,
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       'Content-Type': 'application/json',
-      'Idempotency-Key': key ?? randomUUID(),
+      ...(key === null ? {} : { 'Idempotency-Key': key ?? randomUUID() }),
     },
     body: method === 'GET' ? undefined
       : typeof body === 'string' ? body : JSON.stringify(body ?? {}),
   })
 
-async function createMockImage(token = userA.token) {
+async function createMockImage(token = userA.token, base = mock.base) {
   const response = await call('/pipeline/upload-image-from-url', {
     token,
+    base,
     body: { imageUrl: 'https://example.test/photo.jpg', isCommonUse: false },
   })
   assert.equal(response.status, 200)
@@ -412,6 +413,224 @@ test('[mock] a legacy anon JWT is accepted as a public key', async () => {
   assert.match(started.output.text, /\(anon key\)/)
   started.child.kill()
   await started.exited
+})
+
+// ---- Context snapshots, idempotency and one active job per image -------------------------
+
+const submit = (imageId, { context, key, base, token } = {}) =>
+  call('/pipeline/generate-captions', {
+    key, base, token,
+    body: context === undefined ? { imageId } : { imageId, additionalContext: context },
+  })
+const jobOf = async (jobId, base = mock.base) =>
+  (await call(`/pipeline/caption-job/${jobId}`, { method: 'GET', base })).json()
+const stateOf = (imageId, { base = mock.base, token } = {}) =>
+  call(`/pipeline/image-generation-state/${imageId}`, { method: 'GET', base, token })
+const captionOf = job => captions.find(row => row.id === job.captionIds[0])
+const errorCode = async response => (await response.json()).code
+
+test('[mock] a context snapshot that matches the saved context is used for the caption',
+  async () => {
+    const imageId = await createMockImage()
+    images.get(imageId).additional_context = 'Exam week\nCoffee ran out'
+    const response = await submit(imageId, { context: 'Exam week\nCoffee ran out' })
+    assert.equal(response.status, 202)
+    const job = await jobOf((await response.json()).jobId)
+    assert.equal(captionOf(job).content, 'MOCK caption using context: Exam week\nCoffee ran out')
+  })
+
+test('[mock] a cleared snapshot generates without context', async () => {
+  const imageId = await createMockImage()
+  const response = await submit(imageId, { context: null })
+  const job = await jobOf((await response.json()).jobId)
+  assert.equal(captionOf(job).content, 'MOCK caption, no context')
+})
+
+test('[mock] a snapshot that differs from the saved context is refused', async () => {
+  const imageId = await createMockImage()
+  images.get(imageId).additional_context = 'Saved'
+  const before = captions.length
+  const response = await submit(imageId, { context: 'Never saved' })
+  assert.equal(response.status, 409)
+  assert.equal(await errorCode(response), 'context_mismatch')
+  assert.equal(captions.length, before)
+})
+
+test('[mock] reusing a key with a different context is a conflict, not a new job', async () => {
+  const imageId = await createMockImage()
+  images.get(imageId).additional_context = 'One'
+  const key = randomUUID()
+  const first = await submit(imageId, { context: 'One', key })
+  assert.equal(first.status, 202)
+  const { jobId } = await first.json()
+
+  const same = await submit(imageId, { context: 'One', key })
+  assert.equal((await same.json()).jobId, jobId, 'the same request resumes its job')
+
+  images.get(imageId).additional_context = 'Two'
+  const before = captions.length
+  const changed = await submit(imageId, { context: 'Two', key })
+  assert.equal(changed.status, 409)
+  assert.equal(await errorCode(changed), 'idempotency_conflict')
+  const legacy = await submit(imageId, { key })
+  assert.equal(legacy.status, 409, 'dropping the snapshot is also a different request')
+  assert.equal(captions.length, before)
+})
+
+test('[mock] invalid snapshots and missing keys are refused with 400', async () => {
+  const imageId = await createMockImage()
+  for (const context of ['x'.repeat(281), 'Use ${step1Output}', 42, ['a'], {}]) {
+    assert.equal((await submit(imageId, { context })).status, 400, JSON.stringify(context))
+  }
+  assert.equal((await submit(imageId, { key: null })).status, 400)
+  assert.equal((await submit(imageId, { key: 'bad key!' })).status, 400)
+  for (const body of ['[]', 'null', '"text"']) {
+    assert.equal((await call('/pipeline/generate-captions', { body })).status, 400)
+  }
+})
+
+test('[mock] a context that is exactly 280 characters is accepted', async () => {
+  const imageId = await createMockImage()
+  const context = 'x'.repeat(280)
+  images.get(imageId).additional_context = context
+  assert.equal((await submit(imageId, { context })).status, 202)
+})
+
+test('[mock] the image state route advertises snapshots for this run’s own images', async () => {
+  const imageId = await createMockImage()
+  const response = await stateOf(imageId)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { supportsContextSnapshots: true, activeJob: false })
+})
+
+test('[mock] the image state route refuses imported, banger and other users’ images',
+  async () => {
+    for (const row of [
+      seedImage(),
+      seedImage({ is_common_use: true }),
+      seedImage({ profile_id: userB.id }),
+    ]) {
+      assert.equal((await stateOf(row.id)).status, 403)
+    }
+    assert.equal((await stateOf(await createMockImage(), { token: userB.token })).status, 403)
+    assert.equal((await stateOf(await createMockImage(), { token: null })).status, 401)
+  })
+
+test('[mock] a snapshot on an imported or banger image is still refused', async () => {
+  for (const row of [seedImage(), seedImage({ is_common_use: true })]) {
+    const response = await submit(row.id, { context: null })
+    assert.equal(response.status, 403)
+  }
+})
+
+test('[mock] with a delay, one job per image runs and its snapshot cannot change', async () => {
+  const slow = await startMock({
+    NEXT_PUBLIC_SUPABASE_URL: fakeUrl,
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: publicKey,
+    MOCK_CAPTION_DELAY_MS: '400',
+  })
+  try {
+    const base = slow.base
+    const imageId = await createMockImage(userA.token, base)
+    images.get(imageId).additional_context = 'Snapshot'
+    const accepted = await submit(imageId, { context: 'Snapshot', base })
+    assert.equal(accepted.status, 202)
+    const { jobId } = await accepted.json()
+    assert.equal((await jobOf(jobId, base)).status, 'running')
+    assert.equal((await (await stateOf(imageId, { base })).json()).activeJob, true)
+
+    // Another submission for the same image, with or without a snapshot, is refused.
+    for (const context of ['Snapshot', undefined]) {
+      const second = await submit(imageId, { context, base })
+      assert.equal(second.status, 409)
+      assert.equal(await errorCode(second), 'generation_in_progress')
+    }
+    // Editing the row mid-job does not reach the running job.
+    images.get(imageId).additional_context = 'Edited during the job'
+
+    let job
+    for (let attempt = 0; attempt < 100; attempt++) {
+      job = await jobOf(jobId, base)
+      if (job.status !== 'running') break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    assert.equal(job.status, 'completed')
+    assert.equal(captionOf(job).content, 'MOCK caption using context: Snapshot')
+    assert.equal((await (await stateOf(imageId, { base })).json()).activeJob, false)
+    assert.equal((await submit(imageId, { context: 'Edited during the job', base })).status, 202,
+      'a new job is allowed once the first is done')
+  } finally {
+    slow.child.kill()
+    await slow.exited
+  }
+})
+
+test('[mock] simultaneous submissions for one image start exactly one job', async () => {
+  const slow = await startMock({
+    NEXT_PUBLIC_SUPABASE_URL: fakeUrl,
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: publicKey,
+    MOCK_CAPTION_DELAY_MS: '300',
+  })
+  try {
+    const imageId = await createMockImage(userA.token, slow.base)
+    const before = captions.length
+    const responses = await Promise.all(Array.from({ length: 5 },
+      () => submit(imageId, { context: null, base: slow.base })))
+    assert.deepEqual(responses.map(response => response.status).sort(),
+      [202, 409, 409, 409, 409])
+    await new Promise(resolve => setTimeout(resolve, 500))
+    assert.equal(captions.length, before + 1)
+  } finally {
+    slow.child.kill()
+    await slow.exited
+  }
+})
+
+test('[mock] a refused submission can be retried with the same key', async () => {
+  const flaky = await startMock({
+    NEXT_PUBLIC_SUPABASE_URL: fakeUrl,
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: publicKey,
+    MOCK_CAPTION_FAIL_SUBMITS: '1',
+  })
+  try {
+    const imageId = await createMockImage(userA.token, flaky.base)
+    const key = randomUUID()
+    const before = captions.length
+    const refused = await submit(imageId, { context: null, key, base: flaky.base })
+    assert.equal(refused.status, 503)
+    assert.equal(captions.length, before)
+    const retried = await submit(imageId, { context: null, key, base: flaky.base })
+    assert.equal(retried.status, 202)
+    const again = await submit(imageId, { context: null, key, base: flaky.base })
+    assert.equal((await again.json()).jobId, (await retried.json()).jobId)
+    assert.equal(captions.length, before + 1)
+  } finally {
+    flaky.child.kill()
+    await flaky.exited
+  }
+})
+
+test('[mock] a failed caption insert releases the image for another attempt', async () => {
+  const imageId = await createMockImage()
+  failCaptionInsert = true
+  assert.equal((await submit(imageId, { context: null })).status, 500)
+  failCaptionInsert = false
+  assert.equal((await submit(imageId, { context: null })).status, 202)
+})
+
+test('[mock] invalid delay or failure settings stop startup', async () => {
+  for (const env of [{ MOCK_CAPTION_DELAY_MS: '-1' }, { MOCK_CAPTION_DELAY_MS: 'soon' },
+    { MOCK_CAPTION_FAIL_SUBMITS: '1.5' }]) {
+    const started = spawnMock({
+      NEXT_PUBLIC_SUPABASE_URL: fakeUrl,
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: publicKey,
+      ...env,
+    })
+    const timer = setTimeout(() => started.child.kill(), 3000)
+    assert.equal(await started.exited, 1)
+    clearTimeout(timer)
+    assert.match(started.output.text, /did not start/)
+  }
 })
 
 // Keep this test last: it checks the traffic and logs from every test above.
