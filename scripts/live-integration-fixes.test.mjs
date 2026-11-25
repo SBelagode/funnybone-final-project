@@ -31,7 +31,9 @@ const display = () => loadModule('utils/display-image-url.ts')
 
 // A cookie-backed Supabase client. Reading session.user throws, as a reminder that it is
 // unverified: the code under test must never touch it.
-function supabase({ user = { id: userId }, token = userToken, visibleUrls = [stored], inserts } = {}) {
+function supabase({
+  user = { id: userId }, token = userToken, visibleUrls = [stored], inserts,
+} = {}) {
   const calls = []
   const session = token === null ? null : Object.defineProperty({ access_token: token }, 'user', {
     get() { throw new Error('session.user is unverified and must not be read') },
@@ -57,7 +59,9 @@ function supabase({ user = { id: userId }, token = userToken, visibleUrls = [sto
         upsert(payload) { query.upsert = payload; return builder },
         delete() { query.delete = true; return builder },
         order() { return builder },
-        async single() { return inserts?.(query) ?? { data: { id: 1, ...query.insert }, error: null } },
+        async single() {
+          return inserts?.(query) ?? { data: { id: 1, ...query.insert }, error: null }
+        },
         then(resolve) {
           return Promise.resolve(inserts?.(query) ?? { data: query.insert ? [query.insert] : null,
             error: null }).then(resolve)
@@ -106,8 +110,10 @@ const imageBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0])
 function upstream(status = 200, type = 'image/jpeg') {
   const requests = []
   globalThis.fetch = async (url, init) => {
-    requests.push({ url: String(url), authorization: init?.headers?.Authorization, redirect: init?.redirect })
-    return new Response(status === 200 ? imageBytes : null, { status, headers: { 'Content-Type': type } })
+    requests.push({ url: String(url), authorization: init?.headers?.Authorization,
+      redirect: init?.redirect })
+    return new Response(status === 200 ? imageBytes : null,
+      { status, headers: { 'Content-Type': type } })
   }
   return requests
 }
@@ -123,8 +129,10 @@ test('[mock] the owner gets the image bytes, fetched with their own verified tok
   assert.equal(response.headers.get('cache-control'), 'private, max-age=300')
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), imageBytes)
-  assert.deepEqual(requests, [{ url: stored, authorization: `Bearer ${userToken}`, redirect: 'manual' }])
-  assert.deepEqual(client.calls[0].filters, [['url', stored]], 'access is checked for the exact URL')
+  assert.deepEqual(requests,
+    [{ url: stored, authorization: `Bearer ${userToken}`, redirect: 'manual' }])
+  assert.deepEqual(client.calls[0].filters, [['url', stored]],
+    'access is checked for the exact URL')
 })
 
 test('[mock] an image the caller cannot read under RLS is not fetched at all', async () => {
@@ -148,9 +156,10 @@ test('[mock] a session token for a different user is never forwarded', async () 
   assert.equal(requests[0].authorization, undefined)
 })
 
-test('[mock] malformed keys, upload targets and a missing API get 404 with no queries', async () => {
+test('[mock] malformed keys, upload targets and a missing API get 404, no queries', async () => {
   const requests = upstream()
-  for (const key of ['content/zz', `content/${sha}/extra`, `uploads/${randomUUID()}/${randomUUID()}`,
+  for (const key of ['content/zz', `content/${sha}/extra`,
+    `uploads/${randomUUID()}/${randomUUID()}`,
     '../etc/passwd', '']) {
     const client = supabase()
     assert.equal((await get(proxy(client), key)).status, 404, key)
@@ -167,7 +176,8 @@ test('[mock] only image responses are passed through', async () => {
   upstream(200, 'text/html')
   assert.equal((await get(proxy(supabase()), `content/${sha}`)).status, 404)
   upstream(302, 'image/jpeg')
-  assert.equal((await get(proxy(supabase()), `content/${sha}`)).status, 404, 'redirects are refused')
+  assert.equal((await get(proxy(supabase()), `content/${sha}`)).status, 404,
+    'redirects are refused')
   globalThis.fetch = async () => { throw new TypeError('fetch failed') }
   assert.equal((await get(proxy(supabase()), `content/${sha}`)).status, 404)
 })
@@ -234,7 +244,10 @@ test('[mock] voting follows the toggle rules: up, switch, remove', async () => {
     inserts(query) {
       if (query.table !== 'caption_votes') return undefined
       if (query.delete) { votes.length = 0; return { data: null, error: null } }
-      if (query.insert) { votes.push(query.insert.vote_value); return { data: query.insert, error: null } }
+      if (query.insert) {
+        votes.push(query.insert.vote_value)
+        return { data: query.insert, error: null }
+      }
       return { data: votes.length ? { vote_value: votes.at(-1) } : null, error: null }
     },
   })
@@ -256,7 +269,7 @@ test('[mock] voting follows the toggle rules: up, switch, remove', async () => {
   assert.deepEqual(votes, [-1], 'initial downvote')
 })
 
-test('[mock] a bookmark is a plain insert of the two allowed columns, never an upsert', async () => {
+test('[mock] a bookmark is a plain insert of the two allowed columns, not an upsert', async () => {
   const client = supabase()
   const { insertSaveAction } = action('app/actions/captions/insert-save-action.ts', client)
   await insertSaveAction('caption-1')

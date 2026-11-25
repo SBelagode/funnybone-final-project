@@ -12,6 +12,7 @@ export default function NavigationMenu() {
     { label: "Top 100", href: "/" },
     { label: "Favorites", href: "/favorites" },
     { label: "Images", href: "/my-images" },
+    { label: "Metrics", href: "/metrics" },
   ];
 
   return (

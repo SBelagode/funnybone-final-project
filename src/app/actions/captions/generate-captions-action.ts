@@ -172,7 +172,8 @@ export async function registerImageFromUrl(
 
   return {
     imageId: response.imageId,
-    imageUrl: typeof response.imageUrl === 'string' && response.imageUrl ? response.imageUrl : imageUrl,
+    imageUrl: typeof response.imageUrl === 'string' && response.imageUrl
+      ? response.imageUrl : imageUrl,
   }
 }
 

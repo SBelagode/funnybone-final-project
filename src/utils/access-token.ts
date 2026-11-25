@@ -26,7 +26,10 @@ type AuthClient = {
   auth: {
     getUser: () => Promise<{ data: { user: { id: string; is_anonymous?: boolean;
       app_metadata?: { provider?: string } } | null }; error?: unknown }>
-    getSession: () => Promise<{ data: { session: { access_token?: string } | null }; error?: unknown }>
+    getSession: () => Promise<{
+      data: { session: { access_token?: string } | null }
+      error?: unknown
+    }>
   }
 }
 

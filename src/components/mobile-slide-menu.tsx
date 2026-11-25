@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { X, Menu, Sparkles, TrendingUp, Heart, Image as ImageIcon } from "lucide-react";
+import { X, Menu, Sparkles, TrendingUp, Heart, Image as ImageIcon, BarChart3 } from "lucide-react";
 import { UserHeaderMenu } from "./user-header-menu";
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -71,6 +71,11 @@ export default function MobileSlideMenu({
       label: "Images",
       href: "/my-images",
       icon: ImageIcon,
+    },
+    {
+      label: "Metrics",
+      href: "/metrics",
+      icon: BarChart3,
     },
   ];
 
